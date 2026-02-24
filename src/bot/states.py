@@ -100,6 +100,89 @@ class StateHandlers:
         await self.input.tap(x, y, jitter=0)
         await wait(timing.get("screen_transition", 2.0), jitter, "occupy cancel")
 
+    # Offsets for tap-and-verify spiral: center, cardinal, diagonal
+    _TAP_OFFSETS = [
+        (0, 0),
+        (0, -30), (30, 0), (0, 30), (-30, 0),       # cardinal ±30px
+        (-30, -30), (30, -30), (30, 30), (-30, 30),   # diagonal ±30px
+        (0, -60), (60, 0), (0, 60), (-60, 0),         # cardinal ±60px
+    ]
+
+    async def _tap_and_verify(
+        self,
+        element_name: str,
+        screen_type: str,
+        expected_screens: list[str],
+        ctx: BotContext,
+        config: dict,
+        png: bytes | None = None,
+    ) -> tuple[bytes, object, bool]:
+        """Tap a calibrated element, verify screen changed, retry with offsets.
+
+        1. Calibrates on current screenshot if needed.
+        2. Taps the calibrated point.
+        3. Waits, captures, identifies screen.
+        4. If screen matches *expected_screens*, saves the working coords and
+           returns (png, screen, True).
+        5. Otherwise tries offsets around the original point.  When an offset
+           works, updates calibration with the corrected coordinates and
+           persists them so we never miss again.
+        6. Returns (png, screen, False) if all offsets fail.
+        """
+        timing = config.get("timing", {})
+        tap_wait = timing.get("screen_transition", 2.0)
+        jitter = timing.get("jitter_factor", 0.3)
+
+        if png is not None:
+            self._calibrate_for_screen(png, screen_type, ctx)
+
+        base_x, base_y = self.calibrator.get_pixel(element_name)
+
+        for i, (dx, dy) in enumerate(self._TAP_OFFSETS):
+            tx = max(0, min(self._screen_w, base_x + dx))
+            ty = max(0, min(self._screen_h, base_y + dy))
+
+            if i == 0:
+                ctx.log_action(f"Tapping {element_name} at ({tx}, {ty})")
+            else:
+                ctx.log_action(
+                    f"Tap didn't work — retrying {element_name} with "
+                    f"offset ({dx:+d}, {dy:+d}) → ({tx}, {ty})"
+                )
+
+            await self.input.tap(tx, ty, jitter=0)
+            await wait(tap_wait, jitter, f"{element_name} verify")
+
+            # Check what screen we're on now
+            check_png = await self.capture.capture()
+            ctx.last_screenshot = check_png
+
+            # Quick local loading check first
+            if self._is_loading_screen(check_png):
+                check_png = await self._wait_past_loading_local(
+                    ctx, config, f"{element_name} post-tap"
+                )
+
+            text = self._call_vision(check_png, "identify_screen")
+            ctx.stats.api_calls += 1
+            screen = parse_screen_identification(text)
+
+            if screen.screen_type in expected_screens:
+                if i > 0:
+                    # The offset worked — update calibration with corrected coords
+                    new_x_pct = tx / self._screen_w * 100
+                    new_y_pct = ty / self._screen_h * 100
+                    ctx.log_action(
+                        f"Offset tap succeeded! Updating {element_name} calibration: "
+                        f"({new_x_pct:.1f}%, {new_y_pct:.1f}%) → ({tx}, {ty})"
+                    )
+                    self.calibrator.store(element_name, new_x_pct, new_y_pct, 1.0)
+                    self.calibrator.save()
+                return check_png, screen, True
+
+        ctx.log_action(f"All tap offsets failed for {element_name}")
+        return check_png, screen, False
+
     def _enter_hibernation(self, screen, ctx: BotContext) -> BotState:
         """Handle hibernation detection — parse timer and go idle."""
         secs = parse_timer_seconds(screen.timer)
@@ -344,14 +427,15 @@ class StateHandlers:
         # Capture a screenshot to calibrate from (we're on the main map)
         png = await self.capture.capture()
         ctx.last_screenshot = png
-        self._calibrate_for_screen(png, "main_map", ctx)
 
-        ctx.log_action("Opening minimap")
-        await self.actions.open_minimap()
+        png, screen, ok = await self._tap_and_verify(
+            element_name="minimap_button",
+            screen_type="main_map",
+            expected_screens=["minimap"],
+            ctx=ctx, config=config, png=png,
+        )
 
-        png, screen = await self._wait_past_loading(ctx, config, "opening minimap")
-
-        if screen.screen_type == "minimap":
+        if ok:
             self._minimap_open_attempts = 0
             return BotState.READING_MINIMAP
 
@@ -865,49 +949,27 @@ class StateHandlers:
                 ctx.error_message = "Reconnect failed: home screen not reached"
                 return BotState.ERROR_RECOVERY
 
-        # ── Step 2: If home_screen, calibrate + tap Star Trek ────────
+        # ── Step 2: If home_screen, tap Star Trek with verification ──
         if current.screen_type in ("home_screen", "main_map", "unknown"):
-            # Calibrate Star Trek button on current screenshot
-            self._calibrate_for_screen(png, "home_screen", ctx)
-            x, y = self.calibrator.get_pixel("star_trek_button")
-            ctx.log_action(f"Tapping Star Trek button at ({x}, {y})")
-            await self.input.tap(x, y, jitter=0)
-            await wait(5.0, jitter, "star trek tap")
-
-            # Wait for mode_select
-            for attempt in range(max_retries):
-                png = await self.capture.capture()
-                ctx.last_screenshot = png
-                text = self._call_vision(png, "identify_screen")
-                ctx.stats.api_calls += 1
-                current = parse_screen_identification(text)
-                ctx.log_action(f"Reconnect: screen={current.screen_type} (attempt {attempt + 1})")
-
-                if current.screen_type == "mode_select":
-                    break
-                elif current.screen_type in ("home_screen", "main_map"):
-                    ctx.log_action("Still on home screen — retapping Star Trek")
-                    x, y = self.calibrator.get_pixel("star_trek_button")
-                    await self.input.tap(x, y, jitter=0)
-                    await wait(5.0, jitter, "retry star trek tap")
-                elif current.screen_type == "loading":
-                    await wait(5.0, jitter, "waiting for load")
-                else:
-                    await wait(5.0, jitter, "waiting for mode select")
-            else:
-                ctx.log_action("Could not reach mode select — going to error recovery")
+            png, current, ok = await self._tap_and_verify(
+                element_name="star_trek_button",
+                screen_type="home_screen",
+                expected_screens=["mode_select"],
+                ctx=ctx, config=config, png=png,
+            )
+            if not ok:
                 ctx.error_message = "Reconnect failed: mode select not reached"
                 return BotState.ERROR_RECOVERY
 
-        # ── Step 3: If mode_select, calibrate + tap Alien Minefield ──
+        # ── Step 3: If mode_select, tap Alien Minefield with verification
         if current.screen_type == "mode_select":
-            self._calibrate_for_screen(png, "mode_select", ctx)
-            x, y = self.calibrator.get_pixel("alien_minefield_button")
-            ctx.log_action(f"Tapping Alien Minefield button at ({x}, {y})")
-            await self.input.tap(x, y, jitter=0)
-            await wait(5.0, jitter, "alien minefield tap")
-
-            # Wait for game to load
+            png, current, ok = await self._tap_and_verify(
+                element_name="alien_minefield_button",
+                screen_type="mode_select",
+                expected_screens=["main_map", "loading"],
+                ctx=ctx, config=config, png=png,
+            )
+            # Even if not "ok", the game might still be loading — proceed
             await wait(5.0, jitter, "game loading")
 
         ctx.log_action("Reconnection complete — reinitializing")
