@@ -447,7 +447,16 @@ class StateHandlers:
             return BotState.OPENING_MINIMAP
 
     async def handle_opening_minimap(self, ctx: BotContext, config: dict) -> BotState:
-        """Open the minimap overlay."""
+        """Open the minimap overlay.
+
+        Uses a single tap + local minimap detection instead of _tap_and_verify,
+        because the minimap is an overlay — offset retry taps would interact
+        destructively with the overlay (tapping monuments, closing it, etc.).
+        """
+        timing = config.get("timing", {})
+        tap_wait = timing.get("screen_transition", 2.0)
+        jitter = timing.get("jitter_factor", 0.3)
+
         self._minimap_open_attempts += 1
 
         if self._minimap_open_attempts > 2:
@@ -459,14 +468,41 @@ class StateHandlers:
         png = await self.capture.capture()
         ctx.last_screenshot = png
 
-        png, screen, ok = await self._tap_and_verify(
-            element_name="minimap_button",
-            screen_type="main_map",
-            expected_screens=["minimap"],
-            ctx=ctx, config=config, png=png,
-        )
+        # Calibrate minimap_button position
+        self._calibrate_for_screen(png, "main_map", ctx)
 
-        if ok:
+        if not self.calibrator.is_calibrated("minimap_button"):
+            ctx.log_action("Could not find minimap_button — retrying")
+            return BotState.OPENING_MINIMAP
+
+        # Single tap — no offset loop (minimap is an overlay)
+        bx, by = self.calibrator.get_pixel("minimap_button")
+        ctx.log_action(f"Tapping minimap_button at ({bx}, {by})")
+        await self.input.tap(bx, by, jitter=0)
+        await wait(tap_wait, jitter, "minimap open")
+
+        # Capture after tap and wait past any loading
+        check_png = await self.capture.capture()
+        ctx.last_screenshot = check_png
+        if self._is_loading_screen(check_png):
+            check_png = await self._wait_past_loading_local(
+                ctx, config, "minimap open"
+            )
+
+        # Verify locally: can we see the minimap's colored squares?
+        detection = find_minimap_squares(check_png)
+        if detection and len(detection.squares) >= 2:
+            ctx.log_action(f"Minimap opened — detected {len(detection.squares)} squares locally")
+            self._minimap_open_attempts = 0
+            return BotState.READING_MINIMAP
+
+        # Local detection didn't find squares — ask Vision what screen this is
+        text = self._call_vision(check_png, "identify_screen")
+        ctx.stats.api_calls += 1
+        screen = parse_screen_identification(text)
+
+        if screen.screen_type == "minimap":
+            # Vision says it's the minimap even though local detection failed
             self._minimap_open_attempts = 0
             return BotState.READING_MINIMAP
 
@@ -477,7 +513,9 @@ class StateHandlers:
             ctx.log_action("Logged out detected — entering reconnection flow")
             return BotState.RECONNECTING
 
-        ctx.log_action("Minimap not detected, retrying...")
+        ctx.log_action(
+            f"Minimap not detected after tap (screen={screen.screen_type}), retrying..."
+        )
         return BotState.OPENING_MINIMAP
 
     async def handle_reading_minimap(self, ctx: BotContext, config: dict) -> BotState:
