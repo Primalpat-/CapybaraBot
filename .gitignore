@@ -14,6 +14,7 @@ env/
 
 screenshots/
 logs/
+config/calibrated_coords.json
 
 .idea/
 .vscode/

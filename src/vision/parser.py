@@ -13,6 +13,7 @@ class ScreenIdentification:
     screen_type: str
     confidence: float
     details: str
+    timer: str = ""  # hibernation countdown e.g. "00:35:31"
 
 
 @dataclass
@@ -41,6 +42,7 @@ class MinimapReading:
 class DefenderInfo:
     slot: int
     status: str  # "active", "defeated", "empty"
+    name: str = ""
 
 
 @dataclass
@@ -58,6 +60,7 @@ class MonumentInfo:
     defenders: list[DefenderInfo]
     all_defenders_defeated: bool
     action_button: ActionButton
+    ownership_text: str = ""
 
 
 @dataclass
@@ -69,11 +72,42 @@ class NavigationCheck:
 
 
 @dataclass
+class WorldMonumentLocation:
+    found: bool
+    x_percent: float
+    y_percent: float
+    confidence: float
+    details: str
+
+
+@dataclass
+class MinimapColors:
+    """Color of each monument slot on the minimap (1-indexed)."""
+    slot_colors: dict[int, str]  # {1: "red", 2: "blue", ...}
+    details: str
+
+
+@dataclass
 class BattleCheck:
     battle_state: str  # "in_progress", "victory", "defeat", "results_screen"
     skip_button_visible: bool
     continue_button_visible: bool
     details: str
+    opponent_name: str = ""
+
+
+@dataclass
+class CalibratedElement:
+    name: str
+    x_percent: float
+    y_percent: float
+    confidence: float
+
+
+@dataclass
+class CalibrationResult:
+    elements: list[CalibratedElement]
+    screen_description: str
 
 
 @dataclass
@@ -119,7 +153,26 @@ def parse_screen_identification(text: str) -> ScreenIdentification:
         screen_type=data.get("screen_type", "unknown"),
         confidence=float(data.get("confidence", 0)),
         details=data.get("details", ""),
+        timer=data.get("timer", ""),
     )
+
+
+def parse_timer_seconds(timer_str: str) -> int | None:
+    """Parse a 'HH:MM:SS' or 'MM:SS' countdown string into total seconds.
+
+    Returns None if the string can't be parsed.
+    """
+    if not timer_str:
+        return None
+    match = re.match(r"(\d{1,2}):(\d{2}):(\d{2})", timer_str)
+    if match:
+        h, m, s = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        return h * 3600 + m * 60 + s
+    match = re.match(r"(\d{1,2}):(\d{2})", timer_str)
+    if match:
+        m, s = int(match.group(1)), int(match.group(2))
+        return m * 60 + s
+    return None
 
 
 def parse_minimap_reading(text: str) -> MinimapReading:
@@ -158,6 +211,7 @@ def parse_monument_info(text: str) -> MonumentInfo:
         defenders.append(DefenderInfo(
             slot=int(d.get("slot", 0)),
             status=d.get("status", "unknown"),
+            name=d.get("name", ""),
         ))
 
     ab = data.get("action_button", {})
@@ -178,6 +232,7 @@ def parse_monument_info(text: str) -> MonumentInfo:
         defenders=defenders,
         all_defenders_defeated=bool(data.get("all_defenders_defeated", False)),
         action_button=action_button,
+        ownership_text=data.get("ownership_text", ""),
     )
 
 
@@ -191,6 +246,31 @@ def parse_navigation_check(text: str) -> NavigationCheck:
     )
 
 
+def parse_world_monument_location(text: str) -> WorldMonumentLocation:
+    data = _extract_json(text)
+    return WorldMonumentLocation(
+        found=bool(data.get("found", False)),
+        x_percent=float(data.get("x_percent", 50)),
+        y_percent=float(data.get("y_percent", 50)),
+        confidence=float(data.get("confidence", 0)),
+        details=data.get("details", ""),
+    )
+
+
+def parse_minimap_colors(text: str) -> MinimapColors:
+    data = _extract_json(text)
+    slot_colors = {}
+    for sq in data.get("squares", []):
+        slot = int(sq.get("slot", 0))
+        color = sq.get("color", "unknown").lower()
+        if slot > 0:
+            slot_colors[slot] = color
+    return MinimapColors(
+        slot_colors=slot_colors,
+        details=data.get("details", ""),
+    )
+
+
 def parse_battle_check(text: str) -> BattleCheck:
     data = _extract_json(text)
     return BattleCheck(
@@ -198,6 +278,25 @@ def parse_battle_check(text: str) -> BattleCheck:
         skip_button_visible=bool(data.get("skip_button_visible", False)),
         continue_button_visible=bool(data.get("continue_button_visible", False)),
         details=data.get("details", ""),
+        opponent_name=data.get("opponent_name", ""),
+    )
+
+
+def parse_calibration_result(text: str) -> CalibrationResult:
+    data = _extract_json(text)
+
+    elements = []
+    for el in data.get("elements", []):
+        elements.append(CalibratedElement(
+            name=el.get("name", ""),
+            x_percent=float(el.get("x_percent", 0)),
+            y_percent=float(el.get("y_percent", 0)),
+            confidence=float(el.get("confidence", 0)),
+        ))
+
+    return CalibrationResult(
+        elements=elements,
+        screen_description=data.get("screen_description", ""),
     )
 
 

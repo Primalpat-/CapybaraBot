@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import signal
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from src.adb.capture import ScreenCapture
 from src.adb.connection import ADBConnection
 from src.adb.input import ADBInput
 from src.bot.actions import BotActions
+from src.bot.calibration import CoordinateCalibrator
 from src.bot.state_machine import BotState, StateMachine
 from src.bot.states import StateHandlers
 from src.dashboard.app import app, set_state_machine
@@ -64,13 +66,17 @@ def build_components(config: dict):
 
     cache = VisionCache(ttl=30.0, max_entries=100)
 
-    actions = BotActions(adb_input, config)
+    calibrator = CoordinateCalibrator(config)
+    if config.get("bot", {}).get("clear_calibration_on_start", False):
+        calibrator.clear_all()
+
+    actions = BotActions(adb_input, config, calibrator)
 
     state_machine = StateMachine(config)
 
-    handlers = StateHandlers(capture, adb_input, vision, cache, actions, config)
+    handlers = StateHandlers(capture, adb_input, vision, cache, actions, config, calibrator)
 
-    return connection, state_machine, handlers, vision
+    return connection, state_machine, handlers, vision, calibrator, adb_input, capture
 
 
 def register_all_handlers(sm: StateMachine, handlers: StateHandlers) -> None:
@@ -79,15 +85,47 @@ def register_all_handlers(sm: StateMachine, handlers: StateHandlers) -> None:
     sm.register_handler(BotState.OPENING_MINIMAP, handlers.handle_opening_minimap)
     sm.register_handler(BotState.READING_MINIMAP, handlers.handle_reading_minimap)
     sm.register_handler(BotState.NAVIGATING, handlers.handle_navigating)
+    sm.register_handler(BotState.APPROACHING_MONUMENT, handlers.handle_approaching_monument)
     sm.register_handler(BotState.CHECKING_MONUMENT, handlers.handle_checking_monument)
     sm.register_handler(BotState.ATTACKING, handlers.handle_attacking)
     sm.register_handler(BotState.SKIPPING_BATTLE, handlers.handle_skipping_battle)
     sm.register_handler(BotState.POST_BATTLE, handlers.handle_post_battle)
     sm.register_handler(BotState.REFRESHING_POPUP, handlers.handle_refreshing_popup)
+    sm.register_handler(BotState.RECONNECTING, handlers.handle_reconnecting)
     sm.register_handler(BotState.IDLE, handlers.handle_idle)
     sm.register_handler(BotState.ERROR_RECOVERY, handlers.handle_error_recovery)
     sm.register_handler(BotState.PAUSED, handlers.handle_paused)
     sm.register_handler(BotState.STOPPED, handlers.handle_stopped)
+
+
+async def detect_screenshot_dimensions(capture: ScreenCapture) -> tuple[int, int] | None:
+    """Capture a test screenshot and return its actual pixel dimensions."""
+    try:
+        pil_image = await capture.capture_pil()
+        w, h = pil_image.size
+        logger.info(f"Actual screenshot dimensions: {w}x{h}")
+        return w, h
+    except Exception as e:
+        logger.warning(f"Could not capture test screenshot for dimension check: {e}")
+    return None
+
+
+async def detect_screen_dimensions(connection: ADBConnection) -> tuple[int, int] | None:
+    """Auto-detect screen dimensions via 'adb shell wm size'."""
+    try:
+        stdout, _, rc = await connection.run_adb("shell", "wm", "size")
+        if rc != 0:
+            return None
+        # Parse "Physical size: WxH" (prefer physical, fall back to override)
+        for line in reversed(stdout.strip().splitlines()):
+            match = re.search(r"(\d+)x(\d+)", line)
+            if match:
+                w, h = int(match.group(1)), int(match.group(2))
+                logger.info(f"Detected screen dimensions: {w}x{h}")
+                return w, h
+    except Exception as e:
+        logger.warning(f"Could not detect screen dimensions: {e}")
+    return None
 
 
 async def run_dashboard(config: dict) -> None:
@@ -111,7 +149,7 @@ async def main() -> None:
     logger.info("Configuration loaded")
 
     try:
-        connection, state_machine, handlers, vision = build_components(config)
+        connection, state_machine, handlers, vision, calibrator, adb_input, capture = build_components(config)
     except FileNotFoundError as e:
         logger.error(f"\n{e}")
         return
@@ -130,6 +168,47 @@ async def main() -> None:
     device = await connection.get_device_info()
     if device:
         logger.info(f"Device: {device.serial} ({device.model or 'unknown model'})")
+
+    # Verify ADB input is functional
+    if not await adb_input.verify_input_works():
+        logger.error("ADB input verification failed — taps may not register in the emulator")
+
+    # Auto-detect screen dimensions
+    wm_dims = await detect_screen_dimensions(connection)
+    screenshot_dims = await detect_screenshot_dimensions(capture)
+
+    if screenshot_dims and wm_dims and screenshot_dims != wm_dims:
+        logger.warning(
+            f"DIMENSION MISMATCH: screenshot={screenshot_dims[0]}x{screenshot_dims[1]} "
+            f"vs wm_size={wm_dims[0]}x{wm_dims[1]}. "
+            f"Using wm_size for tap coordinates. "
+            f"Run 'python -m scripts.diagnose_calibration' to debug."
+        )
+
+    # Use wm size as source of truth (input tap uses wm size coordinate space).
+    # Fall back to screenshot dims, then config defaults.
+    dims = wm_dims or screenshot_dims
+    if dims:
+        w, h = dims
+        calibrator.set_screen_dimensions(w, h)
+        # Also update config so state handlers use the real dimensions
+        config.setdefault("screen", {})["width"] = w
+        config.setdefault("screen", {})["height"] = h
+        handlers._screen_w = w
+        handlers._screen_h = h
+    else:
+        logger.warning(
+            "Could not auto-detect screen size; using config values "
+            f"({config.get('screen', {}).get('width', 1080)}x"
+            f"{config.get('screen', {}).get('height', 1920)})"
+        )
+
+    # Log startup diagnostic summary
+    logger.info(
+        f"Screen: {config.get('screen', {}).get('width', '?')}x"
+        f"{config.get('screen', {}).get('height', '?')} | "
+        f"Calibrated elements: {len(calibrator._calibrated)}"
+    )
 
     # Run bot and dashboard concurrently
     logger.info("Starting bot loop and dashboard...")

@@ -4,38 +4,77 @@ identify_screen:
     Look at this screenshot from the mobile game "Capybara Go" (Alien Minefield mode).
     Identify what screen or state is currently displayed.
 
+    Key visual cues:
+    - "main_map": The main game world view in Alien Minefield mode. You'll see a 3D landscape
+      with capybara characters and monuments. In the top-right corner there is a minimap widget —
+      a square box showing a small overview of the game map. At the bottom of this box is a label
+      with text like "Tier 6 Mine – 2" and a magnifying glass icon. There are also buttons along
+      the bottom such as "Mining", "Shop", "Mine", and "Leaderboard".
+    - "minimap": The minimap has been opened/expanded. You'll see a grid of 4 colored squares
+      (red and/or blue). Each square has an icon in its center. Red squares are enemy monuments,
+      blue squares are friendly/captured monuments. This is the full minimap overlay view.
+    - "monument_popup": A popup/dialog over the game showing details about a specific monument,
+      with defender info and an action button (Attack, Claim, etc.).
+    - "battle_active": An active battle scene with animated combat.
+    - "battle_result": A results screen showing victory or defeat after a battle.
+    - "hibernation": A large sleeping capybara is shown on screen with "Zzz" symbols and
+      text reading "Hibernation ends:" followed by a countdown timer (HH:MM:SS). This means
+      the player cannot perform any actions until hibernation ends.
+    - "logged_out": A popup/dialog titled "Tips" with the text "Logged in on another device"
+      and a large yellow "Restart" button. This appears when the user has logged in from a
+      different device.
+    - "home_screen": The game's main home/lobby screen after logging in. Shows a 3D island
+      scene with buildings, a capybara character, and a large orange "Start" button near the
+      bottom center. There is a row of icon buttons (Homestead, 10 days, Travel, Star,
+      Star Trek) above a bottom navigation bar. The bottom nav bar has icons including
+      "Adventure", "Guild", and "Events". There is NO "Star Trek" banner/header at the top.
+    - "mode_select": The Star Trek game mode selection screen. It has a prominent "Star Trek"
+      banner/header at the TOP of the screen. Below the banner are game mode icons/buttons
+      including "Alien Minefield". This is NOT the home screen — it is the screen you see
+      AFTER tapping the Star Trek button from the home screen.
+    - "occupy_prompt": A "Tips" popup asking whether to continue occupying a monument. The
+      popup text mentions abandoning an already occupied monument and asks "continue to
+      occupy?". It has a pink/red "Cancel" button on the left and a yellow/orange "OK"
+      button on the right. This appears after clearing all defenders from a monument.
+
     Return JSON only:
     {
-      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, loading, menu, unknown>",
+      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, logged_out, home_screen, mode_select, occupy_prompt, loading, menu, unknown>",
       "confidence": <0.0-1.0>,
-      "details": "<brief description of what you see>"
+      "details": "<brief description of what you see>",
+      "timer": "<if hibernation, the countdown timer text e.g. '00:35:31', otherwise omit>"
     }
 
-read_minimap:
-  system: "You analyze game minimaps and return structured JSON with monument positions."
+check_minimap_colors:
+  system: "You analyze game minimaps and identify the color of monument squares."
   prompt: |
-    This is the minimap view from "Capybara Go" Alien Minefield mode.
-    Identify all visible monument icons on the minimap.
+    This is the expanded minimap view from "Capybara Go" Alien Minefield mode.
+    The minimap shows a grid of 4 colored squares arranged in a pattern.
 
-    For each monument, estimate its position as a percentage of the screen dimensions
-    (0,0 = top-left, 100,100 = bottom-right).
+    Each square contains:
+    - Small scattered dots (IGNORE these)
+    - A MONUMENT ICON at the very center — it looks like a crown or arcane temple
+      with a large gem in the middle and two smaller gems on left and right
+    - A number just beneath the monument icon
+
+    Each square's background color is either:
+    - RED = enemy monument (not yet captured)
+    - BLUE = friendly monument (already captured by the player)
+
+    Number the squares 1-4 in reading order: top-left=1, top-right=2, bottom-left=3, bottom-right=4.
+    If they are arranged in a single row or column, number them left-to-right or top-to-bottom.
+
+    For each square, identify its BACKGROUND color (red or blue).
 
     Return JSON only:
     {
-      "monuments": [
-        {
-          "id": <sequential number>,
-          "x_percent": <0-100>,
-          "y_percent": <0-100>,
-          "appearance": "<color/icon description>",
-          "likely_type": "<friendly/enemy/neutral/unknown>"
-        }
+      "squares": [
+        {"slot": 1, "color": "<red or blue>"},
+        {"slot": 2, "color": "<red or blue>"},
+        {"slot": 3, "color": "<red or blue>"},
+        {"slot": 4, "color": "<red or blue>"}
       ],
-      "player_position": {
-        "x_percent": <0-100>,
-        "y_percent": <0-100>
-      },
-      "total_monuments_visible": <count>
+      "details": "<brief description of what you see>"
     }
 
 check_monument:
@@ -44,14 +83,25 @@ check_monument:
     This is a monument popup/info screen from "Capybara Go" Alien Minefield mode.
     Analyze the monument details shown.
 
+    Key sections of the popup:
+    - **Defenders**: Slots showing player names/avatars who are defending this monument.
+      Each slot shows a player name. If the slot is empty, the name area says "Not Garrisoned".
+    - **Monument Ownership** (at the bottom of the popup): This shows who currently owns
+      the monument. If the text is in BLUE and says "Star Spirit", the monument is friendly
+      (owned by the player's alliance). If the text is in RED with a different name, it is
+      enemy-owned. This is the authoritative way to determine ownership.
+    - **Action button**: A large button at the bottom — "Attack", "Claim", or similar.
+
     Return JSON only:
     {
       "ownership": "<player/enemy/neutral/unknown>",
-      "is_friendly": <true/false/null>,
+      "is_friendly": <true if Monument Ownership text is blue/Star Spirit, false if red/enemy, null if unclear>,
       "monument_name": "<name if visible>",
+      "ownership_text": "<the exact text shown in the Monument Ownership section, e.g. 'Star Spirit' or a player/alliance name>",
       "defenders": [
         {
           "slot": <1-based index>,
+          "name": "<defender player name if visible, otherwise empty string>",
           "status": "<active/defeated/empty>"
         }
       ],
@@ -66,14 +116,28 @@ check_monument:
 check_navigation:
   system: "You analyze game navigation screenshots and return structured JSON."
   prompt: |
-    This screenshot is from "Capybara Go" during navigation/movement.
-    Determine if the player has arrived at a monument or is still moving.
+    This screenshot is from "Capybara Go" during or after auto-navigation to a monument.
+    The player's character was sent to walk toward a monument on the map.
+
+    Determine if the character has ARRIVED at the destination or is STILL WALKING.
+
+    Signs the character has arrived:
+    - The character is standing still near a monument/structure
+    - A monument or building is prominently visible nearby
+    - The character is no longer in a walking/running animation
+    - There may be a monument popup already open (but this is NOT required — arrival
+      can happen without a popup)
+
+    Signs still navigating:
+    - The character appears to be walking/running
+    - The path/trail ahead is visible
+    - No monument structure is prominently nearby
 
     Return JSON only:
     {
-      "arrived": <true/false>,
-      "monument_popup_visible": <true/false>,
-      "screen_type": "<navigating/monument_popup/other>",
+      "arrived": <true/false — has the character reached the monument area?>,
+      "monument_popup_visible": <true/false — is a monument info popup already open?>,
+      "screen_type": "<navigating/arrived/monument_popup/other>",
       "details": "<what you observe>"
     }
 
@@ -83,13 +147,50 @@ check_battle:
     This screenshot is from "Capybara Go" during or after a battle.
     Determine the current battle state.
 
+    The screen shows two players: the left player is "you" and the right player is the
+    opponent. Their names are displayed at the top of the screen (e.g. "PlayerName Vs OpponentName").
+
     Return JSON only:
     {
       "battle_state": "<in_progress/victory/defeat/results_screen/unknown>",
+      "opponent_name": "<the opponent's name from the top of the screen, or empty string if not visible>",
       "skip_button_visible": <true/false>,
       "continue_button_visible": <true/false>,
       "details": "<what you observe>"
     }
+
+calibrate_elements:
+  system: "You analyze mobile game screenshots to locate UI elements and return their positions as percentages of the image dimensions. Values MUST be between 0 and 100."
+  prompt: |
+    Look at this screenshot from the mobile game "Capybara Go" (Alien Minefield mode).
+    Locate the following UI elements and return the CENTER position of each one
+    as a PERCENTAGE of the image dimensions:
+    - x_percent: 0 = left edge, 50 = horizontal center, 100 = right edge
+    - y_percent: 0 = top edge, 50 = vertical center, 100 = bottom edge
+
+    IMPORTANT: Values MUST be between 0 and 100. These are percentages, NOT pixel coordinates.
+    For example, an element at the top-right corner would be approximately (90, 10).
+    An element in the dead center of the screen would be (50, 50).
+    Aim for the exact visual center of each element. For buttons, target the center of
+    the button text/icon, not the bottom edge of the button.
+
+    Elements to find:
+    {elements_description}
+
+    Return JSON only:
+    {{
+      "elements": [
+        {{
+          "name": "<element name exactly as given above>",
+          "x_percent": <0-100, percentage of image width>,
+          "y_percent": <0-100, percentage of image height>,
+          "confidence": <0.0-1.0, how sure you are you found the right element>
+        }}
+      ],
+      "screen_description": "<brief description of what you see on screen>"
+    }}
+
+    If you cannot find an element, still include it but set confidence to 0.
 
 post_battle:
   system: "You analyze post-battle monument state and return structured JSON."

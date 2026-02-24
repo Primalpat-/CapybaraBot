@@ -14,11 +14,13 @@ class BotState(Enum):
     OPENING_MINIMAP = auto()
     READING_MINIMAP = auto()
     NAVIGATING = auto()
+    APPROACHING_MONUMENT = auto()
     CHECKING_MONUMENT = auto()
     ATTACKING = auto()
     SKIPPING_BATTLE = auto()
     POST_BATTLE = auto()
     REFRESHING_POPUP = auto()
+    RECONNECTING = auto()
     IDLE = auto()
     ERROR_RECOVERY = auto()
     PAUSED = auto()
@@ -129,7 +131,7 @@ class StateMachine:
         timeout = self.config.get("bot", {}).get("stuck_timeout", 60)
         elapsed = time.time() - self.context.state_enter_time
         if elapsed > timeout and self.state not in (
-            BotState.PAUSED, BotState.STOPPED, BotState.IDLE
+            BotState.PAUSED, BotState.STOPPED, BotState.IDLE, BotState.RECONNECTING
         ):
             logger.warning(
                 f"Stuck in {self.state.name} for {elapsed:.1f}s (timeout={timeout}s)"

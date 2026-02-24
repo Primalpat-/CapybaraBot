@@ -44,7 +44,7 @@ class VisionClient:
         input_token_cost_per_million: float = 3.0,
         output_token_cost_per_million: float = 15.0,
     ):
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(timeout=60.0)
         self.model = model
         self.max_tokens = max_tokens
         self.max_image_dimension = max_image_dimension
@@ -92,6 +92,7 @@ class VisionClient:
         ]
 
         start = time.time()
+        logger.info(f"Vision API call starting (model={self.model})...")
 
         kwargs = {
             "model": self.model,
@@ -102,7 +103,12 @@ class VisionClient:
         if system:
             kwargs["system"] = system
 
-        response = self.client.messages.create(**kwargs)
+        try:
+            response = self.client.messages.create(**kwargs)
+        except Exception as e:
+            latency = time.time() - start
+            logger.error(f"Vision API call FAILED after {latency:.2f}s: {e}")
+            raise
         latency = time.time() - start
 
         input_tokens = response.usage.input_tokens

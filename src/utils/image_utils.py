@@ -10,7 +10,12 @@ logger = logging.getLogger(__name__)
 
 
 def resize_for_api(image: Image.Image, max_dimension: int = 1024) -> Image.Image:
-    """Resize image so its longest side is at most max_dimension pixels."""
+    """Resize image so its longest side is at most max_dimension pixels.
+
+    Pass max_dimension=0 to skip resizing entirely.
+    """
+    if max_dimension <= 0:
+        return image
     w, h = image.size
     if max(w, h) <= max_dimension:
         return image

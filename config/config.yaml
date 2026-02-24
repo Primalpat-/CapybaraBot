@@ -1,7 +1,7 @@
 adb:
   # Path to adb executable. Use "adb" if it's on your PATH, otherwise set the full path.
   # Example: "C:/platform-tools/adb.exe"
-  adb_path: "adb"
+  adb_path: "C:/platform-tools/adb.exe"
   host: "127.0.0.1"
   port: 5555
   # BlueStacks default ADB port; adjust if needed
@@ -65,6 +65,10 @@ timing:
   navigation_poll_interval: 2.0
   monument_popup_wait: 1.5
   error_recovery_wait: 3.0
+  # How long to wait when a loading/black screen is detected
+  loading_wait: 5.0
+  # How many times to retry when stuck on a loading screen
+  loading_max_retries: 6
   # Jitter factor (±percentage)
   jitter_factor: 0.3
 
@@ -77,6 +81,10 @@ bot:
   stuck_timeout: 60
   # Max monuments per session (0 = unlimited)
   max_monuments: 0
+  # Seconds to wait before restarting after logged-out detection (10 min)
+  logged_out_restart_delay: 15
+  # Clear all calibrated coordinates on bot startup (useful during testing)
+  clear_calibration_on_start: true
 
 dashboard:
   host: "0.0.0.0"
