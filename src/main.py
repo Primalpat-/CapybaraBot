@@ -35,6 +35,7 @@ def build_components(config: dict):
     connection = ADBConnection(
         host=adb_cfg.get("host", "127.0.0.1"),
         port=adb_cfg.get("port", 5555),
+        adb_path=adb_cfg.get("adb_path", "adb"),
         connect_timeout=adb_cfg.get("connect_timeout", 10),
         command_timeout=adb_cfg.get("command_timeout", 30),
         reconnect_attempts=adb_cfg.get("reconnect_attempts", 3),
@@ -109,7 +110,12 @@ async def main() -> None:
     config = load_config()
     logger.info("Configuration loaded")
 
-    connection, state_machine, handlers, vision = build_components(config)
+    try:
+        connection, state_machine, handlers, vision = build_components(config)
+    except FileNotFoundError as e:
+        logger.error(f"\n{e}")
+        return
+
     register_all_handlers(state_machine, handlers)
 
     # Wire dashboard to bot state

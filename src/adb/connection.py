@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +16,59 @@ class DeviceInfo:
     model: str | None = None
 
 
+def _resolve_adb_path(adb_path: str) -> str:
+    """Resolve the ADB executable path, raising a clear error if not found."""
+    # If it's an absolute/relative path, check it directly
+    p = Path(adb_path)
+    if p.is_absolute() or "/" in adb_path or "\\" in adb_path:
+        if p.exists():
+            return str(p)
+        raise FileNotFoundError(
+            f"ADB executable not found at: {adb_path}\n"
+            f"Download Android platform-tools from:\n"
+            f"  https://developer.android.com/tools/releases/platform-tools\n"
+            f"Then set adb.adb_path in config/config.yaml to the full path."
+        )
+
+    # Bare name like "adb" — check PATH
+    found = shutil.which(adb_path)
+    if found:
+        return found
+
+    # Not on PATH — check common locations
+    common_locations = [
+        Path.home() / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools" / "adb.exe",
+        Path("C:/platform-tools/adb.exe"),
+        Path("C:/Android/platform-tools/adb.exe"),
+        Path("C:/Program Files/BlueStacks_nxt/HD-Adb.exe"),
+        Path("C:/Program Files/BlueStacks/HD-Adb.exe"),
+    ]
+
+    for loc in common_locations:
+        if loc.exists():
+            logger.info(f"Found ADB at: {loc}")
+            return str(loc)
+
+    raise FileNotFoundError(
+        f"ADB executable '{adb_path}' not found on PATH or in common locations.\n"
+        f"\n"
+        f"To fix this, either:\n"
+        f"  1. Download Android platform-tools from:\n"
+        f"     https://developer.android.com/tools/releases/platform-tools\n"
+        f"     Extract it (e.g. to C:\\platform-tools) and either:\n"
+        f"       - Add that folder to your system PATH, or\n"
+        f"       - Set adb.adb_path in config/config.yaml to the full path\n"
+        f"         e.g.: adb_path: \"C:/platform-tools/adb.exe\"\n"
+        f"\n"
+        f"  2. If you already have ADB installed, set the full path in config/config.yaml."
+    )
+
+
 class ADBConnection:
     """Manages ADB connection to BlueStacks."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 5555,
+                 adb_path: str = "adb",
                  connect_timeout: int = 10, command_timeout: int = 30,
                  reconnect_attempts: int = 3, reconnect_delay: float = 2.0):
         self.host = host
@@ -29,6 +80,10 @@ class ADBConnection:
         self.reconnect_delay = reconnect_delay
         self._connected = False
 
+        # Resolve ADB path at init so we fail fast with a clear message
+        self.adb_path = _resolve_adb_path(adb_path)
+        logger.info(f"Using ADB: {self.adb_path}")
+
     @property
     def connected(self) -> bool:
         return self._connected
@@ -36,14 +91,21 @@ class ADBConnection:
     async def run_adb(self, *args: str, timeout: int | None = None) -> tuple[str, str, int]:
         """Run an ADB command and return (stdout, stderr, returncode)."""
         timeout = timeout or self.command_timeout
-        cmd = ["adb", "-s", self.serial, *args]
+        cmd = [self.adb_path, "-s", self.serial, *args]
         logger.debug(f"ADB: {' '.join(cmd)}")
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Could not execute ADB at: {self.adb_path}\n"
+                f"Check that the file exists and is executable."
+            )
+
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout

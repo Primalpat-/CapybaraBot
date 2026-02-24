@@ -7,7 +7,9 @@
       "Bash(python:*)",
       "Bash(cd:*)",
       "Skill(claude-developer-platform)",
-      "Bash(cd /c/Projects/CapybaraBot && pip install pytest pytest-asyncio pyyaml 2>&1)"
+      "Bash(cd /c/Projects/CapybaraBot && pip install pytest pytest-asyncio pyyaml 2>&1)",
+      "Bash(where adb:*)",
+      "Bash(find:*)"
     ]
   }
 }

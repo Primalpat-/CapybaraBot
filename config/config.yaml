@@ -1,4 +1,7 @@
 adb:
+  # Path to adb executable. Use "adb" if it's on your PATH, otherwise set the full path.
+  # Example: "C:/platform-tools/adb.exe"
+  adb_path: "adb"
   host: "127.0.0.1"
   port: 5555
   # BlueStacks default ADB port; adjust if needed
