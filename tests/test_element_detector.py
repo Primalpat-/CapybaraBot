@@ -185,15 +185,21 @@ class TestTemplateMatching:
     def setup_method(self):
         self.detector = ElementDetector()
 
-    def test_no_template_returns_empty(self):
+    def test_no_template_returns_empty(self, tmp_path, monkeypatch):
         """Without a saved template, template elements return nothing."""
+        import src.vision.element_detector as mod
+        monkeypatch.setattr(mod, "_TEMPLATE_DIR", tmp_path)
+
         img = _make_image()
         png = _to_png(img)
         results = self.detector.detect(png, "home_screen")
         assert results == []
 
-    def test_has_template_false_initially(self):
-        """No templates exist on fresh detector."""
+    def test_has_template_false_initially(self, tmp_path, monkeypatch):
+        """No templates exist in an empty directory."""
+        import src.vision.element_detector as mod
+        monkeypatch.setattr(mod, "_TEMPLATE_DIR", tmp_path)
+
         assert not self.detector.has_template("star_trek_button")
         assert not self.detector.has_template("alien_minefield_button")
 

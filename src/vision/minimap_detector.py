@@ -140,11 +140,11 @@ def _detect_contour_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection |
 
 
 def _detect_grid_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection | None:
-    """Adaptive grid-based detection — sample colors from 2x2 quadrants.
+    """Adaptive detection — wide HSV contours + center-pixel color sampling.
 
-    Uses very wide HSV masks to find the minimap region (area with highest
-    density of red+blue pixels), splits it into a 2x2 grid, and classifies
-    each quadrant by sampling center pixel colors.
+    Like the contour approach but with much wider HSV ranges so it catches
+    squares whose colors shift across devices. Color classification uses
+    adaptive center-pixel sampling instead of fixed mask counting.
     """
     # ── Very wide masks to catch any red/blue across devices ────
     red1_wide = cv2.inRange(hsv, np.array([0, 20, 20]), np.array([25, 255, 255]))
@@ -155,102 +155,135 @@ def _detect_grid_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection | No
 
     combined = red_wide | blue_wide
 
-    # Clean up noise
+    # Aggressive cleanup — the wide masks catch lots of small UI noise
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
 
-    # ── Find the bounding region of all colored pixels ──────────
-    points = cv2.findNonZero(combined)
-    if points is None or len(points) < 100:
-        logger.info("Adaptive grid: not enough colored pixels found")
-        return None
+    # ── Find contours (same filtering as contour approach) ──────
+    contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    rx, ry, rw, rh = cv2.boundingRect(points)
+    min_area = int(w * h * 0.015)
+    max_area = int(w * h * 0.15)
 
-    # Sanity check: the region should be roughly square-ish and
-    # cover a reasonable portion of the image
-    region_area = rw * rh
-    image_area = w * h
-    if region_area < image_area * 0.02 or region_area > image_area * 0.8:
-        logger.info(f"Adaptive grid: region area out of range ({region_area}/{image_area})")
-        return None
+    candidates = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area or area > max_area:
+            continue
 
-    aspect = rw / rh if rh > 0 else 0
-    if not (0.3 < aspect < 3.0):
-        logger.info(f"Adaptive grid: bad aspect ratio ({aspect:.2f})")
-        return None
+        x, y, cw, ch = cv2.boundingRect(c)
+        aspect = cw / ch if ch > 0 else 0
+        if not (0.4 < aspect < 2.5):
+            continue
 
-    logger.debug(f"Adaptive grid: minimap region at ({rx},{ry}) size {rw}x{rh}")
+        cx = x + cw // 2
+        cy = y + ch // 2
 
-    # ── Split into 2x2 grid and sample each quadrant ────────────
-    mid_x = rx + rw // 2
-    mid_y = ry + rh // 2
-
-    # Quadrants: (x_center, y_center) for sampling
-    quadrants = [
-        (rx + rw // 4, ry + rh // 4),         # top-left (slot 1)
-        (rx + 3 * rw // 4, ry + rh // 4),     # top-right (slot 2)
-        (rx + rw // 4, ry + 3 * rh // 4),     # bottom-left (slot 3)
-        (rx + 3 * rw // 4, ry + 3 * rh // 4), # bottom-right (slot 4)
-    ]
-
-    # Sample a small region around each quadrant center
-    sample_radius_x = max(5, rw // 8)
-    sample_radius_y = max(5, rh // 8)
-
-    squares = []
-    for slot_idx, (qx, qy) in enumerate(quadrants, 1):
-        sx1 = max(0, qx - sample_radius_x)
-        sy1 = max(0, qy - sample_radius_y)
-        sx2 = min(w, qx + sample_radius_x)
-        sy2 = min(h, qy + sample_radius_y)
+        # ── Adaptive color: sample center pixels ────────────────
+        # Sample a small region at the contour center (avoiding edges
+        # where background bleeds in).
+        sr = max(5, min(cw, ch) // 4)  # sample radius
+        sx1 = max(0, cx - sr)
+        sy1 = max(0, cy - sr)
+        sx2 = min(w, cx + sr)
+        sy2 = min(h, cy + sr)
 
         sample = hsv[sy1:sy2, sx1:sx2]
         if sample.size == 0:
             continue
 
-        # Get median hue from pixels that have some saturation (skip gray)
-        sat_mask = sample[:, :, 1] > 15  # minimal saturation filter
+        # Only consider pixels with some saturation (skip gray/dark)
+        sat_mask = sample[:, :, 1] > 20
         if not np.any(sat_mask):
             continue
 
         median_h = float(np.median(sample[:, :, 0][sat_mask]))
 
-        # Classify: red hue wraps around 0/180
+        # Classify by hue — red wraps around 0/180
         if median_h < 25 or median_h > 150:
             color = "red"
         elif 80 < median_h < 140:
             color = "blue"
         else:
-            # Ambiguous — skip this quadrant
-            logger.debug(f"  Quadrant {slot_idx}: ambiguous hue {median_h:.0f}")
+            logger.debug(f"  Adaptive contour ({cx},{cy}): ambiguous hue {median_h:.0f} — skipping")
             continue
 
-        # Estimate area from quadrant size
-        quad_area = (rw // 2) * (rh // 2)
+        logger.debug(f"  Adaptive contour ({cx},{cy}): hue={median_h:.0f} → {color}")
+        candidates.append((cx, cy, color, area))
 
-        squares.append((qx, qy, color, quad_area))
-        logger.debug(f"  Quadrant {slot_idx}: center=({qx},{qy}) hue={median_h:.0f} → {color}")
-
-    if len(squares) < 2:
-        logger.info(f"Adaptive grid: classified only {len(squares)} quadrants (need >= 2)")
+    if len(candidates) < 2:
+        logger.info(f"Adaptive detection: found only {len(candidates)} squares (need >= 2)")
         return None
 
-    logger.info(f"Adaptive grid detection: found {len(squares)} squares")
+    # ── If too many candidates, find the 4 that form a 2x2 grid ─
+    if len(candidates) > 4:
+        candidates = _find_grid_cluster(candidates, w, h)
+        if candidates is None or len(candidates) < 2:
+            logger.info("Adaptive detection: could not find a 2x2 grid cluster")
+            return None
 
-    # Build result directly — quadrants are already in slot order
-    result_squares = []
-    for slot_idx, (cx, cy, color, area) in enumerate(squares, 1):
-        result_squares.append(MinimapSquare(
-            slot=slot_idx, center_x=cx, center_y=cy, color=color, area=area,
-        ))
-        logger.info(
-            f"  Slot {slot_idx}: ({cx}, {cy}) = {color}  "
-            f"({cx / w * 100:.1f}%, {cy / h * 100:.1f}%)"
-        )
+    candidates.sort(key=lambda c: c[3], reverse=True)
+    squares = candidates[:4]
 
-    return MinimapDetection(squares=result_squares, image_width=w, image_height=h)
+    logger.info(f"Adaptive detection: found {len(squares)} squares")
+    return _sort_into_grid(squares, w, h)
+
+
+def _find_grid_cluster(
+    candidates: list[tuple[int, int, str, int]], w: int, h: int,
+) -> list[tuple[int, int, str, int]] | None:
+    """From many candidates, find the best group of 4 forming a 2x2 grid.
+
+    Scores groups by how well they form a rectangular grid — the 4 centers
+    should have 2 distinct X values and 2 distinct Y values, roughly evenly
+    spaced.
+    """
+    # Sort by area descending and try subsets of the top candidates
+    candidates.sort(key=lambda c: c[3], reverse=True)
+    top = candidates[:8]  # limit search space
+
+    best_group = None
+    best_score = float("inf")
+
+    # Try all combinations of 4 from top candidates
+    from itertools import combinations
+    for group in combinations(top, 4):
+        xs = sorted(c[0] for c in group)
+        ys = sorted(c[1] for c in group)
+
+        # For a 2x2 grid: 2 clusters in X and 2 in Y
+        # Split at median
+        mid_x = (xs[1] + xs[2]) / 2
+        mid_y = (ys[1] + ys[2]) / 2
+
+        left = [c for c in group if c[0] < mid_x]
+        right = [c for c in group if c[0] >= mid_x]
+        top_row = [c for c in group if c[1] < mid_y]
+        bot_row = [c for c in group if c[1] >= mid_y]
+
+        # Should have exactly 2 in each partition
+        if len(left) != 2 or len(right) != 2 or len(top_row) != 2 or len(bot_row) != 2:
+            continue
+
+        # Score: variance of areas (squares should be similar size) +
+        # how rectangular the arrangement is
+        areas = [c[3] for c in group]
+        area_var = np.var(areas) / (np.mean(areas) ** 2 + 1)
+
+        # Check that left-pair X values are close, right-pair X values are close
+        x_spread_left = abs(left[0][0] - left[1][0])
+        x_spread_right = abs(right[0][0] - right[1][0])
+        y_spread_top = abs(top_row[0][1] - top_row[1][1])
+        y_spread_bot = abs(bot_row[0][1] - bot_row[1][1])
+
+        alignment = (x_spread_left + x_spread_right + y_spread_top + y_spread_bot) / max(w, 1)
+
+        score = area_var + alignment
+        if score < best_score:
+            best_score = score
+            best_group = list(group)
+
+    return best_group
 
 
 def _sort_into_grid(
