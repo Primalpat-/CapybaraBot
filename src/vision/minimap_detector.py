@@ -1,12 +1,14 @@
 """Detect minimap squares using pixel color analysis instead of Vision API.
 
 Uses a two-pass approach:
-1. **Contour-based** (original): HSV thresholding → contours → grid sorting.
-2. **Adaptive grid-based** (fallback): Very wide HSV masks to find the minimap
-   region, then split into a 2x2 grid and sample center colors directly.
+1. **Contour-based** (original): HSV thresholding -> contours -> grid sorting.
+2. **Frame-based** (fallback): Detects the dark purple grid frame, finds the
+   4 square regions as "holes" inside the filled frame contour, then samples
+   center pixel colors to classify red vs blue.
 
-The grid-based approach is more robust across devices because it doesn't
-depend on tight HSV thresholds — it assumes a 2x2 layout and reads colors.
+The frame-based approach is more robust across devices because it finds the
+grid structure from the frame shape (not the square colors), then adaptively
+reads whatever colors are actually in each quadrant.
 """
 
 import logging
@@ -49,7 +51,7 @@ def find_minimap_squares(png_bytes: bytes) -> MinimapDetection | None:
     """Detect the 4 minimap squares using color thresholding.
 
     Tries the contour-based approach first. If it finds fewer than 2 squares,
-    falls back to the adaptive grid-based approach.
+    falls back to the frame-based approach.
 
     Args:
         png_bytes: Raw PNG screenshot bytes from ADB screencap.
@@ -72,32 +74,27 @@ def find_minimap_squares(png_bytes: bytes) -> MinimapDetection | None:
     if result is not None:
         return result
 
-    # Fall back to adaptive grid-based detection
-    logger.info("Contour detection failed — trying adaptive grid-based approach")
-    return _detect_grid_based(hsv, w, h)
+    # Fall back to frame-based detection
+    logger.info("Contour detection failed -- trying frame-based approach")
+    return _detect_frame_based(hsv, w, h)
 
 
 def _detect_contour_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection | None:
     """Original contour-based detection with fixed HSV ranges."""
-    # ── Red mask (for contour detection) ─────────────────────────
     red1 = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([15, 255, 255]))
     red2 = cv2.inRange(hsv, np.array([165, 40, 40]), np.array([180, 255, 255]))
     red_mask = red1 | red2
 
-    # ── Wider red mask (for color classification only) ─────────
     red1_wide = cv2.inRange(hsv, np.array([0, 25, 25]), np.array([20, 255, 255]))
     red2_wide = cv2.inRange(hsv, np.array([155, 25, 25]), np.array([180, 255, 255]))
     red_mask_wide = red1_wide | red2_wide
 
-    # ── Blue mask ───────────────────────────────────────────────
     blue_mask = cv2.inRange(hsv, np.array([90, 25, 40]), np.array([130, 255, 255]))
 
-    # ── Combined + morphological cleanup ────────────────────────
     combined = red_mask | blue_mask
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel_open)
 
-    # ── Find contours ───────────────────────────────────────────
     contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     min_area = int(w * h * 0.015)
@@ -123,7 +120,7 @@ def _detect_contour_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection |
         blue_count = int(np.count_nonzero(region_blue))
         color = "red" if red_count > blue_count else "blue"
         logger.debug(
-            f"  Contour ({cx},{cy}): red_px={red_count} blue_px={blue_count} → {color}"
+            f"  Contour ({cx},{cy}): red_px={red_count} blue_px={blue_count} -> {color}"
         )
 
         candidates.append((cx, cy, color, area))
@@ -139,50 +136,73 @@ def _detect_contour_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection |
     return _sort_into_grid(squares, w, h)
 
 
-def _detect_grid_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection | None:
-    """Adaptive detection — wide HSV contours + center-pixel color sampling.
+def _detect_frame_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection | None:
+    """Frame-based detection -- find the dark purple grid frame, then locate
+    the 4 square regions as "holes" inside the filled frame contour.
 
-    Like the contour approach but with much wider HSV ranges so it catches
-    squares whose colors shift across devices. Color classification uses
-    adaptive center-pixel sampling instead of fixed mask counting.
+    The grid frame and dividers have a distinctive dark purple color
+    (H~165-170, S~85-105, V~70-80). By finding the largest frame contour
+    and inverting the mask inside it, the 4 square content regions appear
+    as separate blobs that can be independently located and color-sampled.
     """
-    # ── Very wide masks to catch any red/blue across devices ────
-    red1_wide = cv2.inRange(hsv, np.array([0, 20, 20]), np.array([25, 255, 255]))
-    red2_wide = cv2.inRange(hsv, np.array([150, 20, 20]), np.array([180, 255, 255]))
-    red_wide = red1_wide | red2_wide
+    # -- Mask the dark purple frame & dividers -------------------
+    frame_mask = cv2.inRange(hsv, np.array([155, 40, 30]), np.array([178, 160, 110]))
 
-    blue_wide = cv2.inRange(hsv, np.array([80, 20, 20]), np.array([140, 255, 255]))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_CLOSE, kernel)
+    frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_OPEN, kernel)
 
-    combined = red_wide | blue_wide
+    # -- Find the largest contour = the grid frame ---------------
+    contours, _ = cv2.findContours(frame_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        logger.info("Frame detection: no frame contours found")
+        return None
 
-    # Aggressive cleanup — the wide masks catch lots of small UI noise
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
+    largest = max(contours, key=cv2.contourArea)
+    frame_area = cv2.contourArea(largest)
+    image_area = w * h
 
-    # ── Find contours (same filtering as contour approach) ──────
-    contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if frame_area < image_area * 0.02:
+        logger.info(f"Frame detection: largest contour too small ({frame_area:.0f})")
+        return None
 
-    min_area = int(w * h * 0.015)
-    max_area = int(w * h * 0.15)
+    fx, fy, fw, fh = cv2.boundingRect(largest)
+    logger.debug(f"Frame detection: frame contour at ({fx},{fy}) {fw}x{fh}")
+
+    # -- Invert: find square content as holes inside the frame ---
+    # Fill the frame contour solid, then subtract frame-colored pixels.
+    # The remaining regions = the square content areas.
+    filled = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(filled, [largest], -1, 255, -1)
+
+    content_mask = filled & (~frame_mask)
+
+    k2 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    content_mask = cv2.morphologyEx(content_mask, cv2.MORPH_OPEN, k2)
+    content_mask = cv2.morphologyEx(content_mask, cv2.MORPH_CLOSE, k2)
+
+    # -- Find the 4 square regions ------------------------------
+    sq_contours, _ = cv2.findContours(content_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    min_sq_area = frame_area * 0.03
+    max_sq_area = frame_area * 0.40
 
     candidates = []
-    for c in contours:
+    for c in sq_contours:
         area = cv2.contourArea(c)
-        if area < min_area or area > max_area:
+        if area < min_sq_area or area > max_sq_area:
             continue
 
-        x, y, cw, ch = cv2.boundingRect(c)
-        aspect = cw / ch if ch > 0 else 0
+        bx, by, bw, bh = cv2.boundingRect(c)
+        aspect = bw / bh if bh > 0 else 0
         if not (0.4 < aspect < 2.5):
             continue
 
-        cx = x + cw // 2
-        cy = y + ch // 2
+        cx = bx + bw // 2
+        cy = by + bh // 2
 
-        # ── Adaptive color: sample center pixels ────────────────
-        # Sample a small region at the contour center (avoiding edges
-        # where background bleeds in).
-        sr = max(5, min(cw, ch) // 4)  # sample radius
+        # -- Adaptive color sampling at center -------------------
+        sr = max(5, min(bw, bh) // 4)
         sx1 = max(0, cx - sr)
         sy1 = max(0, cy - sr)
         sx2 = min(w, cx + sr)
@@ -192,98 +212,33 @@ def _detect_grid_based(hsv: np.ndarray, w: int, h: int) -> MinimapDetection | No
         if sample.size == 0:
             continue
 
-        # Only consider pixels with some saturation (skip gray/dark)
-        sat_mask = sample[:, :, 1] > 20
+        sat_mask = sample[:, :, 1] > 15
         if not np.any(sat_mask):
-            continue
-
-        median_h = float(np.median(sample[:, :, 0][sat_mask]))
-
-        # Classify by hue — red wraps around 0/180
-        if median_h < 25 or median_h > 150:
-            color = "red"
-        elif 80 < median_h < 140:
-            color = "blue"
+            median_v = float(np.median(sample[:, :, 2]))
+            color = "blue" if median_v > 100 else "red"
         else:
-            logger.debug(f"  Adaptive contour ({cx},{cy}): ambiguous hue {median_h:.0f} — skipping")
-            continue
+            median_h = float(np.median(sample[:, :, 0][sat_mask]))
+            if median_h < 25 or median_h > 150:
+                color = "red"
+            elif 80 < median_h < 145:
+                color = "blue"
+            else:
+                median_s = float(np.median(sample[:, :, 1][sat_mask]))
+                color = "red" if median_s > 100 else "blue"
 
-        logger.debug(f"  Adaptive contour ({cx},{cy}): hue={median_h:.0f} → {color}")
+        logger.debug(f"  Frame content ({cx},{cy}): area={area:.0f} -> {color}")
         candidates.append((cx, cy, color, area))
 
     if len(candidates) < 2:
-        logger.info(f"Adaptive detection: found only {len(candidates)} squares (need >= 2)")
+        logger.info(f"Frame detection: found only {len(candidates)} content regions")
         return None
 
-    # ── If too many candidates, find the 4 that form a 2x2 grid ─
-    if len(candidates) > 4:
-        candidates = _find_grid_cluster(candidates, w, h)
-        if candidates is None or len(candidates) < 2:
-            logger.info("Adaptive detection: could not find a 2x2 grid cluster")
-            return None
-
+    # Take the 4 largest
     candidates.sort(key=lambda c: c[3], reverse=True)
     squares = candidates[:4]
 
-    logger.info(f"Adaptive detection: found {len(squares)} squares")
+    logger.info(f"Frame detection: found {len(squares)} squares")
     return _sort_into_grid(squares, w, h)
-
-
-def _find_grid_cluster(
-    candidates: list[tuple[int, int, str, int]], w: int, h: int,
-) -> list[tuple[int, int, str, int]] | None:
-    """From many candidates, find the best group of 4 forming a 2x2 grid.
-
-    Scores groups by how well they form a rectangular grid — the 4 centers
-    should have 2 distinct X values and 2 distinct Y values, roughly evenly
-    spaced.
-    """
-    # Sort by area descending and try subsets of the top candidates
-    candidates.sort(key=lambda c: c[3], reverse=True)
-    top = candidates[:8]  # limit search space
-
-    best_group = None
-    best_score = float("inf")
-
-    # Try all combinations of 4 from top candidates
-    from itertools import combinations
-    for group in combinations(top, 4):
-        xs = sorted(c[0] for c in group)
-        ys = sorted(c[1] for c in group)
-
-        # For a 2x2 grid: 2 clusters in X and 2 in Y
-        # Split at median
-        mid_x = (xs[1] + xs[2]) / 2
-        mid_y = (ys[1] + ys[2]) / 2
-
-        left = [c for c in group if c[0] < mid_x]
-        right = [c for c in group if c[0] >= mid_x]
-        top_row = [c for c in group if c[1] < mid_y]
-        bot_row = [c for c in group if c[1] >= mid_y]
-
-        # Should have exactly 2 in each partition
-        if len(left) != 2 or len(right) != 2 or len(top_row) != 2 or len(bot_row) != 2:
-            continue
-
-        # Score: variance of areas (squares should be similar size) +
-        # how rectangular the arrangement is
-        areas = [c[3] for c in group]
-        area_var = np.var(areas) / (np.mean(areas) ** 2 + 1)
-
-        # Check that left-pair X values are close, right-pair X values are close
-        x_spread_left = abs(left[0][0] - left[1][0])
-        x_spread_right = abs(right[0][0] - right[1][0])
-        y_spread_top = abs(top_row[0][1] - top_row[1][1])
-        y_spread_bot = abs(bot_row[0][1] - bot_row[1][1])
-
-        alignment = (x_spread_left + x_spread_right + y_spread_top + y_spread_bot) / max(w, 1)
-
-        score = area_var + alignment
-        if score < best_score:
-            best_score = score
-            best_group = list(group)
-
-    return best_group
 
 
 def _sort_into_grid(
