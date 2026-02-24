@@ -1,0 +1,89 @@
+adb:
+  host: "127.0.0.1"
+  port: 5555
+  # BlueStacks default ADB port; adjust if needed
+  connect_timeout: 10
+  command_timeout: 30
+  reconnect_attempts: 3
+  reconnect_delay: 2.0
+
+screen:
+  width: 1080
+  height: 1920
+
+coordinates:
+  # Minimap button position (top-right area)
+  minimap_button:
+    x: 980
+    y: 180
+
+  # Monument tap positions on minimap (populated during gameplay)
+  # These are relative to the minimap overlay
+  minimap_center:
+    x: 540
+    y: 960
+
+  # Attack/action button on monument popup
+  action_button:
+    x: 540
+    y: 1600
+
+  # Close popup button (X)
+  close_popup:
+    x: 950
+    y: 400
+
+  # Skip battle button
+  skip_battle:
+    x: 540
+    y: 1750
+
+  # Back button area
+  back_button:
+    x: 100
+    y: 100
+
+vision:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 1024
+  max_image_dimension: 1024
+  temperature: 0.0
+  # Cost tracking
+  input_token_cost_per_million: 3.0
+  output_token_cost_per_million: 15.0
+
+timing:
+  # Base delays in seconds (jitter applied on top)
+  after_tap: 0.8
+  after_swipe: 1.2
+  screen_transition: 2.0
+  minimap_open: 1.5
+  battle_poll_interval: 3.0
+  navigation_poll_interval: 2.0
+  monument_popup_wait: 1.5
+  error_recovery_wait: 3.0
+  # Jitter factor (±percentage)
+  jitter_factor: 0.3
+
+bot:
+  # Maximum consecutive errors before stopping
+  max_consecutive_errors: 5
+  # Maximum total errors before stopping
+  max_total_errors: 20
+  # Stuck detection: max time in one state (seconds)
+  stuck_timeout: 60
+  # Max monuments per session (0 = unlimited)
+  max_monuments: 0
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+  # How many log entries to keep in memory
+  max_log_entries: 500
+
+input:
+  # Tap jitter in pixels
+  tap_jitter: 5
+  # Swipe duration range in milliseconds
+  swipe_duration_min: 200
+  swipe_duration_max: 400

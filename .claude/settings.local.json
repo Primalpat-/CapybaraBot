@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(adb version:*)",
+      "Bash(pip show:*)",
+      "Bash(head:*)",
+      "Bash(python:*)",
+      "Bash(cd:*)",
+      "Skill(claude-developer-platform)",
+      "Bash(cd /c/Projects/CapybaraBot && pip install pytest pytest-asyncio pyyaml 2>&1)"
+    ]
+  }
+}

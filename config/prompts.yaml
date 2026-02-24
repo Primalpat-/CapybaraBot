@@ -1,0 +1,110 @@
+identify_screen:
+  system: "You analyze mobile game screenshots and return structured JSON."
+  prompt: |
+    Look at this screenshot from the mobile game "Capybara Go" (Alien Minefield mode).
+    Identify what screen or state is currently displayed.
+
+    Return JSON only:
+    {
+      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, loading, menu, unknown>",
+      "confidence": <0.0-1.0>,
+      "details": "<brief description of what you see>"
+    }
+
+read_minimap:
+  system: "You analyze game minimaps and return structured JSON with monument positions."
+  prompt: |
+    This is the minimap view from "Capybara Go" Alien Minefield mode.
+    Identify all visible monument icons on the minimap.
+
+    For each monument, estimate its position as a percentage of the screen dimensions
+    (0,0 = top-left, 100,100 = bottom-right).
+
+    Return JSON only:
+    {
+      "monuments": [
+        {
+          "id": <sequential number>,
+          "x_percent": <0-100>,
+          "y_percent": <0-100>,
+          "appearance": "<color/icon description>",
+          "likely_type": "<friendly/enemy/neutral/unknown>"
+        }
+      ],
+      "player_position": {
+        "x_percent": <0-100>,
+        "y_percent": <0-100>
+      },
+      "total_monuments_visible": <count>
+    }
+
+check_monument:
+  system: "You analyze game monument popups and return structured JSON."
+  prompt: |
+    This is a monument popup/info screen from "Capybara Go" Alien Minefield mode.
+    Analyze the monument details shown.
+
+    Return JSON only:
+    {
+      "ownership": "<player/enemy/neutral/unknown>",
+      "is_friendly": <true/false/null>,
+      "monument_name": "<name if visible>",
+      "defenders": [
+        {
+          "slot": <1-based index>,
+          "status": "<active/defeated/empty>"
+        }
+      ],
+      "all_defenders_defeated": <true/false>,
+      "action_button": {
+        "visible": <true/false>,
+        "text": "<button text if readable>",
+        "action_type": "<attack/claim/visit/unknown>"
+      }
+    }
+
+check_navigation:
+  system: "You analyze game navigation screenshots and return structured JSON."
+  prompt: |
+    This screenshot is from "Capybara Go" during navigation/movement.
+    Determine if the player has arrived at a monument or is still moving.
+
+    Return JSON only:
+    {
+      "arrived": <true/false>,
+      "monument_popup_visible": <true/false>,
+      "screen_type": "<navigating/monument_popup/other>",
+      "details": "<what you observe>"
+    }
+
+check_battle:
+  system: "You analyze battle screens and return structured JSON."
+  prompt: |
+    This screenshot is from "Capybara Go" during or after a battle.
+    Determine the current battle state.
+
+    Return JSON only:
+    {
+      "battle_state": "<in_progress/victory/defeat/results_screen/unknown>",
+      "skip_button_visible": <true/false>,
+      "continue_button_visible": <true/false>,
+      "details": "<what you observe>"
+    }
+
+post_battle:
+  system: "You analyze post-battle monument state and return structured JSON."
+  prompt: |
+    This screenshot shows a monument after a battle in "Capybara Go" Alien Minefield mode.
+    Analyze the updated monument state.
+
+    Return JSON only:
+    {
+      "monument_captured": <true/false>,
+      "remaining_defenders": <count or null>,
+      "all_defenders_defeated": <true/false>,
+      "next_action_available": "<attack_next_defender/claim/leave/unknown>",
+      "action_button": {
+        "visible": <true/false>,
+        "text": "<button text if readable>"
+      }
+    }

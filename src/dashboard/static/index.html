@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CapybaraBot Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .header {
+            background: #16213e;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 2px solid #0f3460;
+        }
+        .header h1 { font-size: 1.4em; color: #e94560; }
+        .header .status-badge {
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 0.85em;
+        }
+        .status-running { background: #1b5e20; color: #a5d6a7; }
+        .status-paused { background: #e65100; color: #ffcc80; }
+        .status-stopped { background: #b71c1c; color: #ef9a9a; }
+        .status-error { background: #880e4f; color: #f48fb1; }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid #0f3460;
+        }
+        .panel h2 {
+            font-size: 1em;
+            color: #e94560;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #0f3460;
+        }
+        .full-width { grid-column: 1 / -1; }
+
+        .controls { display: flex; gap: 10px; flex-wrap: wrap; }
+        .controls button {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        .btn-pause { background: #e65100; color: white; }
+        .btn-resume { background: #1b5e20; color: white; }
+        .btn-stop { background: #b71c1c; color: white; }
+        .controls button:hover { opacity: 0.85; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+        }
+        .stat-card {
+            background: #1a1a2e;
+            padding: 12px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .stat-card .value {
+            font-size: 1.6em;
+            font-weight: bold;
+            color: #e94560;
+        }
+        .stat-card .label {
+            font-size: 0.75em;
+            color: #8899aa;
+            margin-top: 4px;
+        }
+
+        .screenshot-container {
+            text-align: center;
+        }
+        .screenshot-container img {
+            max-width: 100%;
+            max-height: 500px;
+            border-radius: 6px;
+            border: 1px solid #0f3460;
+        }
+        .no-image {
+            color: #555;
+            padding: 60px;
+            font-style: italic;
+        }
+
+        .log-container {
+            max-height: 350px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.8em;
+            line-height: 1.6;
+        }
+        .log-entry { padding: 2px 0; border-bottom: 1px solid #0f3460; }
+        .log-entry .time { color: #666; margin-right: 8px; }
+        .log-entry .level-INFO { color: #81c784; }
+        .log-entry .level-WARNING { color: #ffb74d; }
+        .log-entry .level-ERROR { color: #e57373; }
+        .log-entry .level-DEBUG { color: #64b5f6; }
+
+        .action-log {
+            max-height: 250px;
+            overflow-y: auto;
+            font-size: 0.85em;
+            line-height: 1.8;
+        }
+        .action-entry { padding: 2px 0; border-bottom: 1px solid #0f3460; }
+        .action-entry .time { color: #666; margin-right: 8px; }
+
+        @media (max-width: 768px) {
+            .container { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>CapybaraBot</h1>
+        <span id="status-badge" class="status-badge status-stopped">INITIALIZING</span>
+    </div>
+
+    <div class="container">
+        <div class="panel full-width">
+            <h2>Controls</h2>
+            <div class="controls">
+                <button class="btn-pause" onclick="apiPost('/api/pause')">Pause</button>
+                <button class="btn-resume" onclick="apiPost('/api/resume')">Resume</button>
+                <button class="btn-stop" onclick="apiPost('/api/stop')">Stop</button>
+            </div>
+        </div>
+
+        <div class="panel full-width">
+            <h2>Statistics</h2>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="value" id="stat-monuments">0</div>
+                    <div class="label">Monuments Visited</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-battles">0</div>
+                    <div class="label">Battles Fought</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-wins">0</div>
+                    <div class="label">Battles Won</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-captured">0</div>
+                    <div class="label">Captured</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-api">0</div>
+                    <div class="label">API Calls</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-cost">$0.00</div>
+                    <div class="label">API Cost</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-errors">0</div>
+                    <div class="label">Errors</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-runtime">0:00</div>
+                    <div class="label">Runtime</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>Live Screenshot</h2>
+            <div class="screenshot-container">
+                <div id="screenshot-area" class="no-image">No screenshot available</div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>Action Log</h2>
+            <div id="action-log" class="action-log"></div>
+        </div>
+
+        <div class="panel full-width">
+            <h2>System Logs</h2>
+            <div id="system-log" class="log-container"></div>
+        </div>
+    </div>
+
+    <script>
+        function formatTime(ts) {
+            const d = new Date(ts * 1000);
+            return d.toLocaleTimeString();
+        }
+
+        function formatRuntime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+            return `${m}:${String(s).padStart(2,'0')}`;
+        }
+
+        async function apiPost(url) {
+            try {
+                await fetch(url, { method: 'POST' });
+            } catch (e) {
+                console.error('API call failed:', e);
+            }
+        }
+
+        async function updateStatus() {
+            try {
+                const res = await fetch('/api/status');
+                if (!res.ok) return;
+                const data = await res.json();
+
+                // State badge
+                const badge = document.getElementById('status-badge');
+                badge.textContent = data.state;
+                badge.className = 'status-badge';
+                if (data.paused) badge.classList.add('status-paused');
+                else if (!data.running || data.state === 'STOPPED') badge.classList.add('status-stopped');
+                else if (data.state === 'ERROR_RECOVERY') badge.classList.add('status-error');
+                else badge.classList.add('status-running');
+
+                // Stats
+                const s = data.stats;
+                document.getElementById('stat-monuments').textContent = s.monuments_visited;
+                document.getElementById('stat-battles').textContent = s.battles_fought;
+                document.getElementById('stat-wins').textContent = s.battles_won;
+                document.getElementById('stat-captured').textContent = s.monuments_captured;
+                document.getElementById('stat-api').textContent = s.api_calls;
+                document.getElementById('stat-cost').textContent = '$' + s.total_cost.toFixed(2);
+                document.getElementById('stat-errors').textContent = s.errors;
+                document.getElementById('stat-runtime').textContent = formatRuntime(s.runtime_seconds);
+
+                // Action log
+                const logEl = document.getElementById('action-log');
+                logEl.innerHTML = (data.action_log || []).slice(-30).reverse().map(e =>
+                    `<div class="action-entry"><span class="time">${formatTime(e.time)}</span>${e.message}</div>`
+                ).join('');
+
+            } catch (e) { /* ignore */ }
+        }
+
+        async function updateScreenshot() {
+            try {
+                const res = await fetch('/api/screenshot');
+                if (!res.ok) return;
+                const data = await res.json();
+                const area = document.getElementById('screenshot-area');
+                if (data.image) {
+                    area.innerHTML = `<img src="data:image/png;base64,${data.image}" alt="Screenshot">`;
+                } else {
+                    area.innerHTML = '<div class="no-image">No screenshot available</div>';
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        async function updateLogs() {
+            try {
+                const res = await fetch('/api/logs?limit=80');
+                if (!res.ok) return;
+                const data = await res.json();
+                const logEl = document.getElementById('system-log');
+                logEl.innerHTML = (data.logs || []).reverse().map(e =>
+                    `<div class="log-entry"><span class="time">${formatTime(e.time)}</span><span class="level-${e.level}">[${e.level}]</span> ${e.message}</div>`
+                ).join('');
+            } catch (e) { /* ignore */ }
+        }
+
+        // Poll intervals
+        setInterval(updateStatus, 2000);
+        setInterval(updateScreenshot, 3000);
+        setInterval(updateLogs, 4000);
+
+        // Initial load
+        updateStatus();
+        updateScreenshot();
+        updateLogs();
+    </script>
+</body>
+</html>
