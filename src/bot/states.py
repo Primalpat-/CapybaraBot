@@ -20,6 +20,7 @@ from src.bot.state_machine import BotState, BotContext
 from src.utils.timing import wait
 from src.vision.cache import VisionCache
 from src.vision.client import VisionClient
+from src.vision.element_detector import ElementDetector
 from src.vision.minimap_detector import find_minimap_squares, save_detection_debug
 from src.vision.parser import (
     parse_screen_identification,
@@ -50,6 +51,7 @@ class StateHandlers:
         actions: BotActions,
         config: dict,
         calibrator: CoordinateCalibrator,
+        element_detector: ElementDetector | None = None,
     ):
         self.capture = capture
         self.input = adb_input
@@ -58,6 +60,7 @@ class StateHandlers:
         self.actions = actions
         self.config = config
         self.calibrator = calibrator
+        self.element_detector = element_detector
         self._visited_slots: set[int] = set()
         self._screen_w = config.get("screen", {}).get("width", 1080)
         self._screen_h = config.get("screen", {}).get("height", 1920)
@@ -242,20 +245,42 @@ class StateHandlers:
         return response.text
 
     def _calibrate_for_screen(self, png_bytes: bytes, screen_type: str, ctx: BotContext) -> None:
-        """Run Vision calibration for any uncalibrated elements on this screen type."""
+        """Calibrate UI elements: try local OpenCV detection first, Vision API fallback."""
         needed = self.calibrator.needs_calibration(screen_type)
         if not needed:
             return
 
-        # Build description for only the elements we need
+        # ── Step 1: Try local detection (free, fast) ──────────────
+        locally_found: set[str] = set()
+        if self.element_detector is not None:
+            detections = self.element_detector.detect(png_bytes, screen_type)
+            for det in detections:
+                if det.name in needed and det.confidence >= 0.7:
+                    self.calibrator.store(det.name, det.x_percent, det.y_percent, det.confidence)
+                    locally_found.add(det.name)
+                    logger.info(
+                        f"  Local detection: {det.name} at ({det.x_percent:.1f}%, {det.y_percent:.1f}%) "
+                        f"[{det.method}] conf={det.confidence:.2f}"
+                    )
+
+            if locally_found:
+                ctx.log_action(f"Local detection found {len(locally_found)}/{len(needed)} for {screen_type}")
+
+        # ── Step 2: Check what still needs calibration ────────────
+        still_needed = [n for n in needed if n not in locally_found]
+        if not still_needed:
+            self.calibrator.save()
+            return
+
+        # ── Step 3: Vision API fallback for remaining elements ────
         descriptions = []
-        for i, name in enumerate(needed, 1):
+        for i, name in enumerate(still_needed, 1):
             desc = ELEMENT_DESCRIPTIONS.get(name, name)
             descriptions.append(f"{i}. **{name}**: {desc}")
         elements_description = "\n".join(descriptions)
 
-        ctx.log_action(f"Calibrating {len(needed)} elements for {screen_type}")
-        logger.info(f"Calibrating {len(needed)} elements for {screen_type}: {needed}")
+        ctx.log_action(f"Vision API calibrating {len(still_needed)} elements for {screen_type}")
+        logger.info(f"Vision API calibrating {len(still_needed)} elements for {screen_type}: {still_needed}")
 
         system, prompt_template = get_prompt("calibrate_elements")
         prompt = prompt_template.replace("{elements_description}", elements_description)
@@ -265,7 +290,7 @@ class StateHandlers:
         ctx.stats.api_calls += 1
 
         result = parse_calibration_result(response.text)
-        stored_count = 0
+        stored_count = len(locally_found)
         for el in result.elements:
             x_pct = el.x_percent
             y_pct = el.y_percent
@@ -285,9 +310,15 @@ class StateHandlers:
                 f"  Vision returned: {el.name} at ({x_pct:.1f}%, {y_pct:.1f}%) "
                 f"→ tap ({tap_x}, {tap_y})  confidence={el.confidence:.2f}"
             )
-            if el.confidence > 0 and el.name in needed:
+            if el.confidence > 0 and el.name in still_needed:
                 self.calibrator.store(el.name, x_pct, y_pct, el.confidence)
                 stored_count += 1
+
+                # Auto-capture template for template-matchable elements
+                if self.element_detector is not None and el.name in (
+                    "star_trek_button", "alien_minefield_button"
+                ):
+                    self.element_detector.save_template(png_bytes, el.name, x_pct, y_pct)
 
         # Save annotated screenshot for debugging
         self._save_calibration_diagnostic(png_bytes, result.elements, screen_type)

@@ -17,6 +17,7 @@ from src.bot.actions import BotActions
 from src.bot.calibration import CoordinateCalibrator
 from src.bot.state_machine import BotState, StateMachine
 from src.bot.states import StateHandlers
+from src.vision.element_detector import ElementDetector
 from src.dashboard.app import app, set_state_machine
 from src.utils.logging_config import setup_logging
 from src.vision.cache import VisionCache
@@ -72,9 +73,11 @@ def build_components(config: dict):
 
     actions = BotActions(adb_input, config, calibrator)
 
+    element_detector = ElementDetector()
+
     state_machine = StateMachine(config)
 
-    handlers = StateHandlers(capture, adb_input, vision, cache, actions, config, calibrator)
+    handlers = StateHandlers(capture, adb_input, vision, cache, actions, config, calibrator, element_detector)
 
     return connection, state_machine, handlers, vision, calibrator, adb_input, capture
 
