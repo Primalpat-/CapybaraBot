@@ -63,24 +63,25 @@ def find_minimap_squares(png_bytes: bytes) -> MinimapDetection | None:
     h, w = img.shape[:2]
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # ── Red mask (tight — for contour detection) ────────────────
+    # ── Red mask (for contour detection) ─────────────────────────
     # Red hue wraps around 0/180 in OpenCV HSV (0-180 range).
-    # Keep S/V thresholds at 70 to avoid matching the ornate border.
-    red1 = cv2.inRange(hsv, np.array([0, 70, 70]), np.array([12, 255, 255]))
-    red2 = cv2.inRange(hsv, np.array([168, 70, 70]), np.array([180, 255, 255]))
+    # Sampled red squares: H≈175, S≈96, V≈131.
+    red1 = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([15, 255, 255]))
+    red2 = cv2.inRange(hsv, np.array([165, 40, 40]), np.array([180, 255, 255]))
     red_mask = red1 | red2
 
     # ── Wider red mask (for color classification only) ─────────
-    # The game's "red" squares are dark maroon; the tight mask may
-    # miss some pixels.  This wider mask is used only for counting
-    # red-vs-blue inside each contour's bounding box.
-    red1_wide = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([15, 255, 255]))
-    red2_wide = cv2.inRange(hsv, np.array([165, 40, 40]), np.array([180, 255, 255]))
+    # More permissive — used only for counting red-vs-blue
+    # inside each contour's bounding box after detection.
+    red1_wide = cv2.inRange(hsv, np.array([0, 25, 25]), np.array([20, 255, 255]))
+    red2_wide = cv2.inRange(hsv, np.array([155, 25, 25]), np.array([180, 255, 255]))
     red_mask_wide = red1_wide | red2_wide
 
     # ── Blue mask ───────────────────────────────────────────────
-    # The "blue" squares look steel/grayish-blue in the game
-    blue_mask = cv2.inRange(hsv, np.array([90, 30, 50]), np.array([140, 255, 255]))
+    # Sampled blue squares: H≈126, S≈54, V≈121.
+    # Background/border: H≈149, S≈87, V≈100.
+    # Upper hue capped at 130 to exclude background (H≈149).
+    blue_mask = cv2.inRange(hsv, np.array([90, 25, 40]), np.array([130, 255, 255]))
 
     # ── Combined + morphological cleanup ────────────────────────
     combined = red_mask | blue_mask
@@ -92,9 +93,9 @@ def find_minimap_squares(png_bytes: bytes) -> MinimapDetection | None:
     # ── Find contours ───────────────────────────────────────────
     contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Each square should be at least 1.5% of image area (4 squares ~ 6% total minimum)
+    # Each square should be roughly 2-15% of image area
     min_area = int(w * h * 0.015)
-    max_area = int(w * h * 0.15)  # No single square should be > 15%
+    max_area = int(w * h * 0.15)
 
     candidates = []
     for c in contours:
