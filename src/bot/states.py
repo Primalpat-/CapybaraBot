@@ -567,14 +567,14 @@ class StateHandlers:
         use_detection_coords = True
         ctx.log_action(f"Minimap detected: {slot_colors}")
 
-            # Store detected positions in calibrator for consistency
-            for sq in detection.squares:
-                x_pct = sq.center_x / detection.image_width * 100
-                y_pct = sq.center_y / detection.image_height * 100
-                self.calibrator.store(
-                    f"monument_slot_{sq.slot}", x_pct, y_pct, 1.0
-                )
-            self.calibrator.save()
+        # Store detected positions in calibrator for consistency
+        for sq in detection.squares:
+            x_pct = sq.center_x / detection.image_width * 100
+            y_pct = sq.center_y / detection.image_height * 100
+            self.calibrator.store(
+                f"monument_slot_{sq.slot}", x_pct, y_pct, 1.0
+            )
+        self.calibrator.save()
 
         # Pick next unvisited slot, prioritized by flip frequency (most contested first)
         target_slot = None
