@@ -33,6 +33,7 @@ class DetectedElement:
 # Regions are (x_start, y_start, x_end, y_end) as fractions of image size (0-1).
 
 _BOTTOM_CENTER = (0.15, 0.65, 0.85, 1.0)
+_BOTTOM_CENTER_LOW = (0.15, 0.82, 0.85, 1.0)   # OK button only (below popup buttons)
 _BOTTOM_RIGHT = (0.50, 0.70, 1.0, 1.0)
 _CENTER = (0.10, 0.25, 0.90, 0.75)
 _LEFT_HALF = (0.0, 0.30, 0.55, 0.80)
@@ -66,7 +67,7 @@ _PURPLE_UPPER = np.array([155, 255, 255])
 
 _COLOR_ELEMENTS: dict[tuple[str, str], dict] = {
     ("battle_result", "ok_button"): {
-        "region": _BOTTOM_CENTER,
+        "region": _BOTTOM_CENTER_LOW,
         "hsv_lower": _YELLOW_LOWER,
         "hsv_upper": _YELLOW_UPPER,
         "min_area_frac": 0.005,

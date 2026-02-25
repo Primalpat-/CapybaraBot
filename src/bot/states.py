@@ -71,6 +71,7 @@ class StateHandlers:
         self._minimap_open_attempts = 0
         self._retries_without_progress = 0  # consecutive failures across states
         self._hibernation_seconds: int | None = None  # countdown from last detection
+        self._dormant_seconds: int | None = None  # dormant period countdown
         self._unbeatable_players: set[str] = set()  # players we've lost to
 
     def _is_paused(self) -> bool:
@@ -214,6 +215,18 @@ class StateHandlers:
             ctx.log_action(f"Hibernation active — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
         else:
             ctx.log_action("Hibernation active — could not read timer, will recheck in 60s")
+        return BotState.IDLE
+
+    def _enter_dormant(self, screen, ctx: BotContext) -> BotState:
+        """Handle dormant period — parse timer and go idle."""
+        secs = parse_timer_seconds(screen.timer)
+        self._dormant_seconds = secs
+        if secs is not None:
+            m, s = divmod(secs, 60)
+            h, m = divmod(m, 60)
+            ctx.log_action(f"Dormant period — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
+        else:
+            ctx.log_action("Dormant period — could not read timer, will recheck in 60s")
         return BotState.IDLE
 
     def _save_calibration_diagnostic(self, png_bytes: bytes, elements: list, screen_type: str) -> None:
@@ -419,6 +432,7 @@ class StateHandlers:
           battle_active    → SKIPPING_BATTLE    Tap skip, wait for result
           battle_result    → tap OK → POST_BATTLE  Dismiss Victory/Defeat, check monument
           hibernation      → IDLE               Sleep until hibernation timer expires
+          dormant_period   → IDLE               Sleep until dormant timer expires
           logged_out       → RECONNECTING       Wait delay → Restart → Star Trek → Alien Minefield
           home_screen      → RECONNECTING       Star Trek → Alien Minefield
           mode_select      → RECONNECTING       Alien Minefield
@@ -444,6 +458,8 @@ class StateHandlers:
 
         if screen.screen_type == "hibernation":
             return self._enter_hibernation(screen, ctx)
+        elif screen.screen_type == "dormant_period":
+            return self._enter_dormant(screen, ctx)
         elif screen.screen_type in ("logged_out", "home_screen", "mode_select"):
             ctx.log_action(f"Not in game ({screen.screen_type}) — entering reconnection flow")
             return BotState.RECONNECTING
@@ -538,6 +554,9 @@ class StateHandlers:
 
         if screen.screen_type == "hibernation":
             return self._enter_hibernation(screen, ctx)
+
+        if screen.screen_type == "dormant_period":
+            return self._enter_dormant(screen, ctx)
 
         if screen.screen_type == "logged_out":
             ctx.log_action("Logged out detected — entering reconnection flow")
@@ -697,6 +716,9 @@ class StateHandlers:
         if screen.screen_type == "hibernation":
             return self._enter_hibernation(screen, ctx)
 
+        if screen.screen_type == "dormant_period":
+            return self._enter_dormant(screen, ctx)
+
         if screen.screen_type == "logged_out":
             ctx.log_action("Logged out detected — entering reconnection flow")
             return BotState.RECONNECTING
@@ -720,6 +742,9 @@ class StateHandlers:
 
         if screen.screen_type == "hibernation":
             return self._enter_hibernation(screen, ctx)
+
+        if screen.screen_type == "dormant_period":
+            return self._enter_dormant(screen, ctx)
 
         if screen.screen_type == "logged_out":
             ctx.log_action("Logged out detected — entering reconnection flow")
@@ -955,6 +980,8 @@ class StateHandlers:
             return BotState.RECONNECTING
         if screen.screen_type == "hibernation":
             return self._enter_hibernation(screen, ctx)
+        if screen.screen_type == "dormant_period":
+            return self._enter_dormant(screen, ctx)
 
         # Occupy swap prompt — always cancel, never swap monuments
         if screen.screen_type == "occupy_prompt":
@@ -1140,6 +1167,13 @@ class StateHandlers:
             ctx.log_action(f"Hibernation sleep — waking in {h}h{m:02d}m{s:02d}s")
             await self._wait(float(sleep_secs), 0.05, "hibernation sleep")
             self._hibernation_seconds = None
+        elif self._dormant_seconds is not None and self._dormant_seconds > 0:
+            sleep_secs = self._dormant_seconds + 30
+            m, s = divmod(sleep_secs, 60)
+            h, m = divmod(m, 60)
+            ctx.log_action(f"Dormant sleep — waking in {h}h{m:02d}m{s:02d}s")
+            await self._wait(float(sleep_secs), 0.05, "dormant sleep")
+            self._dormant_seconds = None
         else:
             idle_secs = random.uniform(10.0, 120.0)
             ctx.log_action(f"Idle — rechecking in {idle_secs:.0f}s")

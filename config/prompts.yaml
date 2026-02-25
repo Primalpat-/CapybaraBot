@@ -20,6 +20,10 @@ identify_screen:
     - "hibernation": A large sleeping capybara is shown on screen with "Zzz" symbols and
       text reading "Hibernation ends:" followed by a countdown timer (HH:MM:SS). This means
       the player cannot perform any actions until hibernation ends.
+    - "dormant_period": The main game map is visible, but a red/orange banner near
+      the bottom reads "Cannot attack:" followed by a countdown timer (HH:MM:SS).
+      The left sidebar shows a "Dormant Period" icon with "Zzz" symbols. The player
+      cannot attack until the timer expires.
     - "logged_out": A popup/dialog titled "Tips" with the text "Logged in on another device"
       and a large yellow "Restart" button. This appears when the user has logged in from a
       different device.
@@ -39,10 +43,10 @@ identify_screen:
 
     Return JSON only:
     {
-      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, logged_out, home_screen, mode_select, occupy_prompt, loading, menu, unknown>",
+      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, dormant_period, logged_out, home_screen, mode_select, occupy_prompt, loading, menu, unknown>",
       "confidence": <0.0-1.0>,
       "details": "<brief description of what you see>",
-      "timer": "<if hibernation, the countdown timer text e.g. '00:35:31', otherwise omit>"
+      "timer": "<if hibernation or dormant_period, the countdown timer text e.g. '00:35:31', otherwise omit>"
     }
 
 check_minimap_colors:
