@@ -26,10 +26,7 @@ from src.vision.element_detector import ElementDetector
 from src.vision.minimap_detector import find_minimap_squares, save_detection_debug
 from src.vision.parser import (
     parse_screen_identification,
-    parse_minimap_colors,
     parse_monument_info,
-    parse_navigation_check,
-    parse_battle_check,
     parse_post_battle,
     parse_calibration_result,
     parse_timer_seconds,
@@ -73,6 +70,8 @@ class StateHandlers:
         self._hibernation_seconds: int | None = None  # countdown from last detection
         self._dormant_seconds: int | None = None  # dormant period countdown
         self._unbeatable_players: set[str] = set()  # players we've lost to
+        self._attacking_defender: str | None = None  # defender we're currently fighting
+        self._battle_result_png: bytes | None = None  # screenshot of battle result for defeat logging
 
     def _is_paused(self) -> bool:
         """Check if the bot has been paused (used as interrupt_check for waits)."""
@@ -494,16 +493,16 @@ class StateHandlers:
         self._minimap_open_attempts += 1
         self._retries_without_progress += 1
 
-        # Too many consecutive failures — cool down
+        # Too many consecutive failures — use Vision once to figure out where we are
         max_retries = config.get("bot", {}).get("max_idle_retries", 8)
         if self._retries_without_progress > max_retries:
             ctx.log_action(
                 f"Too many retries without progress ({self._retries_without_progress}) "
-                f"— cooling down in idle"
+                f"— reinitializing to identify screen"
             )
             self._minimap_open_attempts = 0
             self._retries_without_progress = 0
-            return BotState.IDLE
+            return BotState.INITIALIZING
 
         if self._minimap_open_attempts > 2:
             ctx.log_action(
@@ -542,29 +541,8 @@ class StateHandlers:
             self._minimap_open_attempts = 0
             return BotState.READING_MINIMAP
 
-        # Local detection didn't find squares — ask Vision what screen this is
-        text = self._call_vision(check_png, "identify_screen")
-        ctx.stats.api_calls += 1
-        screen = parse_screen_identification(text)
-
-        if screen.screen_type == "minimap":
-            # Vision says it's the minimap even though local detection failed
-            self._minimap_open_attempts = 0
-            return BotState.READING_MINIMAP
-
-        if screen.screen_type == "hibernation":
-            return self._enter_hibernation(screen, ctx)
-
-        if screen.screen_type == "dormant_period":
-            return self._enter_dormant(screen, ctx)
-
-        if screen.screen_type == "logged_out":
-            ctx.log_action("Logged out detected — entering reconnection flow")
-            return BotState.RECONNECTING
-
-        ctx.log_action(
-            f"Minimap not detected after tap (screen={screen.screen_type}), retrying..."
-        )
+        # Local detection didn't find squares — retry without Vision
+        ctx.log_action("Minimap not detected after tap, retrying...")
         return BotState.OPENING_MINIMAP
 
     async def handle_reading_minimap(self, ctx: BotContext, config: dict) -> BotState:
@@ -582,24 +560,12 @@ class StateHandlers:
         save_detection_debug(png, detection, debug_path)
 
         if detection is None or len(detection.squares) < 2:
-            ctx.log_action("Could not detect minimap squares via color — falling back to Vision")
-            # Fall back to Vision-based color check
-            text = self._call_vision(png, "check_minimap_colors")
-            ctx.stats.api_calls += 1
-            colors = parse_minimap_colors(text)
-            ctx.log_action(f"Vision minimap colors: {colors.slot_colors}")
-            # With Vision fallback we still need calibrated positions
-            if not self.calibrator.is_calibrated("monument_slot_1"):
-                self._calibrate_for_screen(png, "minimap", ctx)
-                if not self.calibrator.derive_minimap_slots():
-                    ctx.log_action("Could not derive slot positions — retrying")
-                    return BotState.READING_MINIMAP
-            slot_colors = colors.slot_colors
-            use_detection_coords = False
-        else:
-            slot_colors = detection.slot_colors
-            use_detection_coords = True
-            ctx.log_action(f"Minimap detected: {slot_colors}")
+            ctx.log_action("Could not detect minimap squares — retrying from minimap open")
+            return BotState.OPENING_MINIMAP
+
+        slot_colors = detection.slot_colors
+        use_detection_coords = True
+        ctx.log_action(f"Minimap detected: {slot_colors}")
 
             # Store detected positions in calibrator for consistency
             for sq in detection.squares:
@@ -653,15 +619,12 @@ class StateHandlers:
         jitter = timing.get("jitter_factor", 0.3)
         await self._wait(timing.get("screen_transition", 2.0), jitter, "monument tap")
 
-        # Verify the minimap closed — confirms the icon tap worked
+        # Verify the minimap closed locally — if squares still visible, tap missed
         png = await self.capture.capture()
         ctx.last_screenshot = png
 
-        text = self._call_vision(png, "identify_screen")
-        ctx.stats.api_calls += 1
-        screen = parse_screen_identification(text)
-
-        if screen.screen_type == "minimap":
+        still_open = find_minimap_squares(png)
+        if still_open and len(still_open.squares) >= 2:
             ctx.log_action(
                 f"Minimap still open after tapping slot {target_slot} — will retry"
             )
@@ -672,56 +635,43 @@ class StateHandlers:
         return BotState.NAVIGATING
 
     async def handle_navigating(self, ctx: BotContext, config: dict) -> BotState:
-        """Poll until we arrive at the monument."""
+        """Wait a fixed time for the character to walk, then proceed.
+
+        Uses a configurable wait instead of Vision polling — saves API calls
+        and avoids overload.  The character always arrives within a few seconds.
+        """
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
+        nav_wait = timing.get("navigation_wait", 8.0)
 
-        await self._wait(timing.get("navigation_poll_interval", 2.0), jitter, "nav poll")
+        ctx.log_action(f"Navigating to monument — waiting {nav_wait:.0f}s")
+        await self._wait(nav_wait, jitter, "navigation wait")
 
-        png = await self.capture.capture()
-        ctx.last_screenshot = png
+        ctx.stats.monuments_visited += 1
+        if ctx.current_target:
+            self._visited_slots.add(ctx.current_target.get("slot", 0))
 
-        text = self._call_vision(png, "check_navigation")
-        ctx.stats.api_calls += 1
-        nav = parse_navigation_check(text)
-
-        if nav.monument_popup_visible:
-            ctx.log_action("Arrived at monument (popup already open)")
-            ctx.stats.monuments_visited += 1
-            if ctx.current_target:
-                self._visited_slots.add(ctx.current_target.get("slot", 0))
-            return BotState.CHECKING_MONUMENT
-
-        if nav.arrived:
-            ctx.log_action("Arrived at monument — tapping to open popup")
-            ctx.stats.monuments_visited += 1
-            if ctx.current_target:
-                self._visited_slots.add(ctx.current_target.get("slot", 0))
-            return BotState.APPROACHING_MONUMENT
-
-        ctx.log_action("Still navigating...")
-        return BotState.NAVIGATING
+        return BotState.APPROACHING_MONUMENT
 
     async def handle_approaching_monument(self, ctx: BotContext, config: dict) -> BotState:
-        """Tap the monument in the game world to open its popup."""
+        """Tap the monument in the game world to open its popup.
+
+        Uses local ElementDetector instead of Vision to check for the popup.
+        Stuck detection (60s timeout) catches persistent issues like
+        hibernation/logged_out — routes through INITIALIZING for one Vision call.
+        """
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
 
-        png, screen = await self._wait_past_loading(ctx, config, "approaching monument")
+        # Wait past any loading screen locally (no Vision)
+        png = await self._wait_past_loading_local(ctx, config, "approaching monument")
 
-        if screen.screen_type == "monument_popup":
-            ctx.log_action("Monument popup detected")
-            return BotState.CHECKING_MONUMENT
-
-        if screen.screen_type == "hibernation":
-            return self._enter_hibernation(screen, ctx)
-
-        if screen.screen_type == "dormant_period":
-            return self._enter_dormant(screen, ctx)
-
-        if screen.screen_type == "logged_out":
-            ctx.log_action("Logged out detected — entering reconnection flow")
-            return BotState.RECONNECTING
+        # Check locally if monument popup is already open
+        if self.element_detector is not None:
+            popup_els = self.element_detector.detect(png, "monument_popup")
+            if any(e.name in ("action_button", "close_popup") for e in popup_els):
+                ctx.log_action("Monument popup already open (detected locally)")
+                return BotState.CHECKING_MONUMENT
 
         # Calibrate world_monument position if needed (first arrival only)
         self._calibrate_for_screen(png, "arrived_at_monument", ctx)
@@ -733,24 +683,16 @@ class StateHandlers:
 
         await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "waiting for popup")
 
-        # Check if popup opened
-        png, screen = await self._wait_past_loading(ctx, config, "after monument tap")
+        # Check locally again after tap
+        png = await self.capture.capture()
+        ctx.last_screenshot = png
+        if self.element_detector is not None:
+            popup_els = self.element_detector.detect(png, "monument_popup")
+            if any(e.name in ("action_button", "close_popup") for e in popup_els):
+                ctx.log_action("Monument popup opened (detected locally)")
+                return BotState.CHECKING_MONUMENT
 
-        if screen.screen_type == "monument_popup":
-            ctx.log_action("Monument popup opened")
-            return BotState.CHECKING_MONUMENT
-
-        if screen.screen_type == "hibernation":
-            return self._enter_hibernation(screen, ctx)
-
-        if screen.screen_type == "dormant_period":
-            return self._enter_dormant(screen, ctx)
-
-        if screen.screen_type == "logged_out":
-            ctx.log_action("Logged out detected — entering reconnection flow")
-            return BotState.RECONNECTING
-
-        ctx.log_action("Popup not detected, retrying tap...")
+        ctx.log_action("Popup not detected locally, retrying tap...")
         return BotState.APPROACHING_MONUMENT
 
     async def handle_checking_monument(self, ctx: BotContext, config: dict) -> BotState:
@@ -811,6 +753,12 @@ class StateHandlers:
                         )
                         await self.actions.close_popup()
                         return BotState.OPENING_MINIMAP
+            # Store the defender we're about to fight for post-battle tracking
+            self._attacking_defender = None
+            for defender in info.defenders:
+                if defender.status == "active" and defender.name:
+                    self._attacking_defender = defender.name
+                    break
             ctx.log_action(f"Attacking! (button: {info.action_button.text})")
             self._retries_without_progress = 0
             return BotState.ATTACKING
@@ -854,23 +802,29 @@ class StateHandlers:
                 ctx.log_action("Battle started (detected skip button locally)")
             return BotState.SKIPPING_BATTLE
 
-        # Neither button found locally — fall back to Vision before giving up
-        ctx.log_action("No battle UI detected locally — verifying with Vision")
-        text = self._call_vision(png, "identify_screen")
-        ctx.stats.api_calls += 1
-        screen = parse_screen_identification(text)
+        # Neither button found — retry once after a short wait (battle may still load)
+        ctx.log_action("No battle UI detected locally — retrying after short wait")
+        await self._wait(2.0, jitter, "battle detect retry")
+        png = await self.capture.capture()
+        ctx.last_screenshot = png
 
-        if screen.screen_type in ("battle_active", "battle_result"):
+        if self.element_detector is not None:
+            battle_elements = self.element_detector.detect(png, "battle_active")
+            result_elements = self.element_detector.detect(png, "battle_result")
+            skip_found = any(e.name == "skip_battle" for e in battle_elements)
+            ok_found = any(e.name == "ok_button" for e in result_elements)
+
+        if skip_found or ok_found:
             ctx.stats.battles_fought += 1
-            if screen.screen_type == "battle_result":
-                ctx.log_action("Battle already finished (Vision fallback)")
+            if ok_found:
+                ctx.log_action("Battle detected on retry (OK button)")
             else:
-                ctx.log_action("Battle started (Vision fallback)")
+                ctx.log_action("Battle detected on retry (skip button)")
             return BotState.SKIPPING_BATTLE
 
-        # Vision also says not a battle — popup was stale
+        # Still nothing — popup was likely stale
         ctx.log_action(
-            f"Battle did not start (screen={screen.screen_type}) — "
+            "Battle did not start (no battle UI detected locally) — "
             "popup was likely stale, refreshing"
         )
         await self.actions.close_popup()
@@ -904,39 +858,10 @@ class StateHandlers:
             ok_found = any(e.name == "ok_button" for e in result_elements)
 
         if ok_found:
-            # Battle result screen is loaded — NOW use vision to read the outcome
-            ctx.log_action("Battle result screen detected locally — reading result with vision")
-            text = self._call_vision(png, "check_battle")
-            ctx.stats.api_calls += 1
-            battle = parse_battle_check(text)
-
-            ctx.log_action(f"Battle ended: {battle.battle_state}")
-            if battle.battle_state == "victory":
-                ctx.stats.battles_won += 1
-
+            # Battle ended — save screenshot for potential defeat analysis, tap OK
+            ctx.log_action("Battle ended (OK button detected locally)")
+            self._battle_result_png = png
             await self._tap_ok_button(png, ctx, config)
-
-            if battle.battle_state == "defeat":
-                # Save screenshot of the defeat screen
-                defeat_dir = Path(__file__).resolve().parents[2] / "screenshots" / "defeats"
-                defeat_dir.mkdir(parents=True, exist_ok=True)
-                defeat_path = defeat_dir / f"defeat_{int(time.time())}.png"
-                defeat_path.write_bytes(png)
-                logger.info(f"Saved defeat screenshot: {defeat_path}")
-
-                opponent = battle.opponent_name.strip()
-                if opponent:
-                    self._unbeatable_players.add(opponent)
-                    ctx.log_action(
-                        f"DEFEAT by '{opponent}' — added to unbeatable list "
-                        f"({len(self._unbeatable_players)} total: {self._unbeatable_players})"
-                    )
-                else:
-                    ctx.log_action("DEFEAT — could not read opponent name")
-                # Don't return to this monument — go find the next target
-                await self.actions.close_popup()
-                return BotState.OPENING_MINIMAP
-
             return BotState.POST_BATTLE
 
         # No OK button — check if skip button is still visible (battle active)
@@ -945,54 +870,53 @@ class StateHandlers:
             skip_found = any(e.name == "skip_battle" for e in battle_elements)
 
         if not skip_found and not ok_found:
-            # Neither button found — might not be on a battle screen at all
-            # Use vision as fallback to figure out where we are
-            text2 = self._call_vision(png, "identify_screen")
-            ctx.stats.api_calls += 1
-            screen = parse_screen_identification(text2)
-            if screen.screen_type not in ("battle_active", "battle_result"):
-                ctx.log_action(
-                    f"Not on a battle screen (screen={screen.screen_type}) — "
-                    "rerouting through initializing"
-                )
-                return BotState.INITIALIZING
+            # Neither button found — stuck detection (60s timeout) is our safety net
+            ctx.log_action("No battle UI detected locally — retrying")
+        else:
+            ctx.log_action("Battle still in progress...")
 
-        ctx.log_action("Battle still in progress...")
         return BotState.SKIPPING_BATTLE
 
     async def handle_post_battle(self, ctx: BotContext, config: dict) -> BotState:
-        """Check monument ownership after a battle victory.
+        """Check monument state after a battle.
 
         After tapping OK on the battle results screen, the monument popup should
         reappear.  We read it with check_monument and look at the Monument
         Ownership section (blue "Star Spirit" = ours, red = enemy).
+
+        Defeat detection: if the defender we attacked is still "active" in the
+        popup, we lost.  The opponent name comes from _attacking_defender (stored
+        before the battle started).
         """
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
         await self._wait(timing.get("screen_transition", 2.0), jitter, "post battle wait")
 
-        # Wait past any loading screen
-        png, screen = await self._wait_past_loading(ctx, config, "post battle")
+        # Wait past any loading screen locally (no Vision)
+        png = await self._wait_past_loading_local(ctx, config, "post battle")
 
-        # If we ended up on a completely different screen, reroute
-        if screen.screen_type in ("logged_out", "home_screen", "mode_select"):
-            ctx.log_action(f"Post-battle landed on {screen.screen_type} — rerouting")
-            return BotState.RECONNECTING
-        if screen.screen_type == "hibernation":
-            return self._enter_hibernation(screen, ctx)
-        if screen.screen_type == "dormant_period":
-            return self._enter_dormant(screen, ctx)
+        # Check locally for occupy prompt (pink cancel button)
+        if self.element_detector is not None:
+            occupy_els = self.element_detector.detect(png, "occupy_prompt")
+            if any(e.name == "occupy_cancel_button" for e in occupy_els):
+                await self._dismiss_occupy_prompt(png, ctx, config)
+                ctx.stats.monuments_captured += 1
+                ctx.log_action("Monument captured! (dismissed occupy swap prompt)")
+                self._attacking_defender = None
+                self._battle_result_png = None
+                return BotState.INITIALIZING
 
-        # Occupy swap prompt — always cancel, never swap monuments
-        if screen.screen_type == "occupy_prompt":
-            await self._dismiss_occupy_prompt(png, ctx, config)
-            ctx.stats.monuments_captured += 1
-            ctx.log_action("Monument captured! (dismissed occupy swap prompt)")
-            return BotState.INITIALIZING
+        # Check locally for monument popup (action button or close button)
+        popup_detected = False
+        if self.element_detector is not None:
+            popup_els = self.element_detector.detect(png, "monument_popup")
+            popup_detected = any(
+                e.name in ("action_button", "close_popup") for e in popup_els
+            )
 
-        # If the popup isn't visible, try tapping the monument to reopen it
-        if screen.screen_type != "monument_popup":
-            ctx.log_action(f"Post-battle screen is {screen.screen_type} — tapping monument to reopen popup")
+        if not popup_detected:
+            # Popup not visible — tap the monument to reopen it
+            ctx.log_action("Post-battle popup not visible — tapping monument to reopen")
             x, y = self.calibrator.get_pixel("world_monument")
             if x > 0 and y > 0:
                 await self.input.tap(x, y)
@@ -1002,7 +926,7 @@ class StateHandlers:
             png = await self.capture.capture()
             ctx.last_screenshot = png
 
-        # Read the monument popup to check ownership
+        # Read the monument popup to check ownership (essential Vision call)
         text = self._call_vision(png, "check_monument")
         ctx.stats.api_calls += 1
         info = parse_monument_info(text)
@@ -1013,6 +937,37 @@ class StateHandlers:
             f"is_friendly={info.is_friendly}, "
             f"ownership_text='{info.ownership_text}'"
         )
+
+        # Detect defeat: the defender we attacked is still active
+        if self._attacking_defender:
+            still_active = any(
+                d.status == "active" and d.name == self._attacking_defender
+                for d in info.defenders
+            )
+            if still_active:
+                ctx.stats.defeats += 1
+                # Save defeat screenshot if we have it
+                if self._battle_result_png:
+                    defeat_dir = Path(__file__).resolve().parents[2] / "screenshots" / "defeats"
+                    defeat_dir.mkdir(parents=True, exist_ok=True)
+                    defeat_path = defeat_dir / f"defeat_{int(time.time())}.png"
+                    defeat_path.write_bytes(self._battle_result_png)
+                    logger.info(f"Saved defeat screenshot: {defeat_path}")
+                self._unbeatable_players.add(self._attacking_defender)
+                ctx.log_action(
+                    f"DEFEAT by '{self._attacking_defender}' — added to unbeatable list "
+                    f"({len(self._unbeatable_players)} total: {self._unbeatable_players})"
+                )
+                self._attacking_defender = None
+                self._battle_result_png = None
+                await self.actions.close_popup()
+                return BotState.OPENING_MINIMAP
+            else:
+                # Defender was defeated — it's a victory
+                ctx.stats.battles_won += 1
+
+        self._attacking_defender = None
+        self._battle_result_png = None
 
         # Check if the monument is now ours (blue "Star Spirit" ownership)
         if info.is_friendly:
@@ -1033,6 +988,12 @@ class StateHandlers:
                         await self.actions.close_popup()
                         return BotState.OPENING_MINIMAP
 
+            # Store the next defender before attacking
+            self._attacking_defender = None
+            for defender in info.defenders:
+                if defender.status == "active" and defender.name:
+                    self._attacking_defender = defender.name
+                    break
             ctx.log_action("More defenders to fight — attacking next")
             return BotState.ATTACKING
 
