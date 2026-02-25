@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
+class BotPausedInterrupt(Exception):
+    """Raised inside a handler when the bot is paused mid-execution."""
+    pass
+
+
 class BotState(Enum):
     INITIALIZING = auto()
     OPENING_MINIMAP = auto()
@@ -58,6 +63,17 @@ class BotStats:
 
 
 @dataclass
+class MonumentRecord:
+    """Tracking data for a single minimap monument slot."""
+    slot: int
+    last_checked: float = 0.0          # timestamp of last popup check
+    last_status: str = "unknown"       # "friendly", "enemy", "unknown"
+    owner_name: str = ""               # defender/owner name from popup
+    check_count: int = 0               # total times popup was opened
+    flipped_to_enemy: int = 0          # times status changed TO enemy
+
+
+@dataclass
 class BotContext:
     """Shared context passed between state handlers."""
     stats: BotStats = field(default_factory=BotStats)
@@ -68,6 +84,9 @@ class BotContext:
     state_enter_time: float = field(default_factory=time.time)
     error_message: str = ""
     action_log: list = field(default_factory=list)
+    monument_tracker: dict[int, MonumentRecord] = field(default_factory=lambda: {
+        i: MonumentRecord(slot=i) for i in range(1, 5)
+    })
 
     def log_action(self, message: str) -> None:
         entry = {"time": time.time(), "message": message}
@@ -204,6 +223,12 @@ class StateMachine:
                     if next_state != BotState.ERROR_RECOVERY:
                         self.context.stats.consecutive_errors = 0
 
+            except BotPausedInterrupt:
+                # Handler was interrupted by pause — state already set to
+                # PAUSED by pause(), just log and let the loop continue to
+                # the _paused check at the top.
+                self.context.log_action("Paused mid-action")
+
             except Exception as e:
                 logger.exception(f"Error in {self.state.name}: {e}")
                 self.context.stats.errors += 1
@@ -227,4 +252,15 @@ class StateMachine:
             "current_target": self.context.current_target,
             "error_message": self.context.error_message,
             "action_log": self.context.action_log[-50:],
+            "monuments": {
+                slot: {
+                    "slot": rec.slot,
+                    "last_checked": rec.last_checked,
+                    "last_status": rec.last_status,
+                    "owner_name": rec.owner_name,
+                    "check_count": rec.check_count,
+                    "flipped_to_enemy": rec.flipped_to_enemy,
+                }
+                for slot, rec in self.context.monument_tracker.items()
+            },
         }

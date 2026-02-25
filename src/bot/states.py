@@ -1,5 +1,6 @@
 """State handlers for each bot state."""
 
+import asyncio
 import io
 import logging
 import random
@@ -17,7 +18,7 @@ from src.bot.calibration import (
     SCREEN_ELEMENTS,
     NUM_MONUMENT_SLOTS,
 )
-from src.bot.state_machine import BotState, BotContext
+from src.bot.state_machine import BotState, BotContext, BotPausedInterrupt
 from src.utils.timing import wait
 from src.vision.cache import VisionCache
 from src.vision.client import VisionClient
@@ -53,6 +54,7 @@ class StateHandlers:
         config: dict,
         calibrator: CoordinateCalibrator,
         element_detector: ElementDetector | None = None,
+        state_machine=None,
     ):
         self.capture = capture
         self.input = adb_input
@@ -62,6 +64,7 @@ class StateHandlers:
         self.config = config
         self.calibrator = calibrator
         self.element_detector = element_detector
+        self._state_machine = state_machine
         self._visited_slots: set[int] = set()
         self._screen_w = config.get("screen", {}).get("width", 1080)
         self._screen_h = config.get("screen", {}).get("height", 1920)
@@ -69,6 +72,19 @@ class StateHandlers:
         self._retries_without_progress = 0  # consecutive failures across states
         self._hibernation_seconds: int | None = None  # countdown from last detection
         self._unbeatable_players: set[str] = set()  # players we've lost to
+
+    def _is_paused(self) -> bool:
+        """Check if the bot has been paused (used as interrupt_check for waits)."""
+        return self._state_machine is not None and self._state_machine.is_paused
+
+    async def _wait(self, base_delay: float, jitter_factor: float = 0.3,
+                    label: str = "") -> float:
+        """Pause-aware wait — raises BotPausedInterrupt if paused mid-sleep."""
+        result = await wait(base_delay, jitter_factor, label,
+                            interrupt_check=self._is_paused)
+        if result < 0:
+            raise BotPausedInterrupt()
+        return result
 
     async def _tap_ok_button(self, png: bytes, ctx: BotContext, config: dict) -> None:
         """Calibrate and tap the OK button on the battle results screen.
@@ -83,9 +99,9 @@ class StateHandlers:
         ctx.log_action(f"Tapping OK button at ({x}, {y})")
         for tap_x, tap_y in [(x, y), (self._screen_w // 2, int(self._screen_h * 0.85))]:
             await self.input.tap(tap_x, tap_y)
-            await wait(1.0, jitter, "ok button tap")
+            await self._wait(1.0, jitter, "ok button tap")
             await self.input.tap(tap_x, tap_y)
-            await wait(1.0, jitter, "ok button retry")
+            await self._wait(1.0, jitter, "ok button retry")
 
         # Wait past the post-OK loading screen locally — no Vision needed
         await self._wait_past_loading_local(ctx, config, "post ok")
@@ -103,7 +119,7 @@ class StateHandlers:
         x, y = self.calibrator.get_pixel("occupy_cancel_button")
         ctx.log_action(f"Occupy prompt — tapping Cancel at ({x}, {y})")
         await self.input.tap(x, y)
-        await wait(timing.get("screen_transition", 2.0), jitter, "occupy cancel")
+        await self._wait(timing.get("screen_transition", 2.0), jitter, "occupy cancel")
 
     # Offsets for tap-and-verify spiral: center, cardinal, diagonal
     _TAP_OFFSETS = [
@@ -156,7 +172,7 @@ class StateHandlers:
                 )
 
             await self.input.tap(tx, ty)
-            await wait(tap_wait, jitter, f"{element_name} verify")
+            await self._wait(tap_wait, jitter, f"{element_name} verify")
 
             # Check what screen we're on now
             check_png = await self.capture.capture()
@@ -370,7 +386,7 @@ class StateHandlers:
                 f"Black screen ({label}), waiting {loading_wait:.0f}s "
                 f"(attempt {attempt + 1}/{max_retries + 1}, no Vision)"
             )
-            await wait(loading_wait, jitter, f"loading wait ({label})")
+            await self._wait(loading_wait, jitter, f"loading wait ({label})")
 
         ctx.log_action(f"Still black after {max_retries + 1} attempts — proceeding anyway")
         return png
@@ -493,7 +509,7 @@ class StateHandlers:
         bx, by = self.calibrator.get_pixel("minimap_button")
         ctx.log_action(f"Tapping minimap_button at ({bx}, {by})")
         await self.input.tap(bx, by)
-        await wait(tap_wait, jitter, "minimap open")
+        await self._wait(tap_wait, jitter, "minimap open")
 
         # Capture after tap and wait past any loading
         check_png = await self.capture.capture()
@@ -575,23 +591,18 @@ class StateHandlers:
                 )
             self.calibrator.save()
 
-        # Find first red (enemy) slot we haven't visited yet
+        # Pick next unvisited slot, prioritized by flip frequency (most contested first)
         target_slot = None
-        for slot in range(1, NUM_MONUMENT_SLOTS + 1):
-            color = slot_colors.get(slot, "unknown")
-            if color == "red" and slot not in self._visited_slots:
-                target_slot = slot
-                break
+        tracker = ctx.monument_tracker
+        unvisited = [s for s in range(1, NUM_MONUMENT_SLOTS + 1) if s not in self._visited_slots]
+
+        if unvisited:
+            # Sort: highest flipped_to_enemy first, then least recently checked
+            unvisited.sort(key=lambda s: (-tracker[s].flipped_to_enemy, tracker[s].last_checked))
+            target_slot = unvisited[0]
 
         if target_slot is None:
-            # Try any red slot (maybe revisit)
-            for slot in range(1, NUM_MONUMENT_SLOTS + 1):
-                if slot_colors.get(slot, "unknown") == "red":
-                    target_slot = slot
-                    break
-
-        if target_slot is None:
-            ctx.log_action("No red monuments remaining — going idle")
+            ctx.log_action("All monuments checked this cycle — going idle")
             return BotState.IDLE
 
         # Get tap coordinates
@@ -613,7 +624,7 @@ class StateHandlers:
             "x": x,
             "y": y,
         }
-        ctx.log_action(f"Target: slot {target_slot} (red) at ({x}, {y})")
+        ctx.log_action(f"Target: slot {target_slot} at ({x}, {y})")
 
         # Tap the monument icon on the minimap
         logger.info(f"Tapping monument slot {target_slot} at ({x}, {y})")
@@ -621,7 +632,7 @@ class StateHandlers:
 
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
-        await wait(timing.get("screen_transition", 2.0), jitter, "monument tap")
+        await self._wait(timing.get("screen_transition", 2.0), jitter, "monument tap")
 
         # Verify the minimap closed — confirms the icon tap worked
         png = await self.capture.capture()
@@ -646,7 +657,7 @@ class StateHandlers:
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
 
-        await wait(timing.get("navigation_poll_interval", 2.0), jitter, "nav poll")
+        await self._wait(timing.get("navigation_poll_interval", 2.0), jitter, "nav poll")
 
         png = await self.capture.capture()
         ctx.last_screenshot = png
@@ -698,7 +709,7 @@ class StateHandlers:
         ctx.log_action(f"Tapping world monument at ({x}, {y})")
         await self.input.tap(x, y)
 
-        await wait(timing.get("monument_popup_wait", 1.5), jitter, "waiting for popup")
+        await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "waiting for popup")
 
         # Check if popup opened
         png, screen = await self._wait_past_loading(ctx, config, "after monument tap")
@@ -721,7 +732,7 @@ class StateHandlers:
         """Read monument popup and decide what to do."""
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
-        await wait(timing.get("monument_popup_wait", 1.5), jitter, "popup wait")
+        await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "popup wait")
 
         png = await self.capture.capture()
         ctx.last_screenshot = png
@@ -733,6 +744,20 @@ class StateHandlers:
         ctx.stats.api_calls += 1
         info = parse_monument_info(text)
         ctx.monument_info = info
+
+        # Update monument tracker with popup result
+        slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+        if slot in ctx.monument_tracker:
+            rec = ctx.monument_tracker[slot]
+            old_status = rec.last_status
+            new_status = "friendly" if info.is_friendly else "enemy"
+            rec.last_checked = time.time()
+            rec.check_count += 1
+            rec.last_status = new_status
+            rec.owner_name = info.ownership_text or info.ownership or ""
+            # Track flips TO enemy (was friendly/unknown, now enemy)
+            if new_status == "enemy" and old_status != "enemy":
+                rec.flipped_to_enemy += 1
 
         ctx.log_action(
             f"Monument: {info.monument_name or 'unnamed'}, "
@@ -782,25 +807,35 @@ class StateHandlers:
 
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
-        await wait(timing.get("screen_transition", 2.0), jitter, "battle start")
+        await self._wait(timing.get("screen_transition", 2.0), jitter, "battle start")
 
-        # Wait past loading locally (free), then verify with Vision
-        png, screen = await self._wait_past_loading(ctx, config, "attack verify")
+        # Wait past loading locally (free) — no Vision needed
+        png = await self._wait_past_loading_local(ctx, config, "attack verify")
 
-        if screen.screen_type in ("battle_active", "battle_result"):
+        # Detect battle state locally: skip button = active, ok button = fast finish
+        skip_found = False
+        ok_found = False
+        if self.element_detector is not None:
+            battle_elements = self.element_detector.detect(png, "battle_active")
+            result_elements = self.element_detector.detect(png, "battle_result")
+            skip_found = any(e.name == "skip_battle" for e in battle_elements)
+            ok_found = any(e.name == "ok_button" for e in result_elements)
+
+        if skip_found or ok_found:
             ctx.stats.battles_fought += 1
-            if screen.screen_type == "battle_result":
-                # Battle already finished (fast battles)
-                ctx.log_action("Battle already finished")
+            if ok_found:
+                ctx.log_action("Battle already finished (detected OK button locally)")
+            else:
+                ctx.log_action("Battle started (detected skip button locally)")
             return BotState.SKIPPING_BATTLE
 
-        # Attack didn't go through — popup was stale
+        # Neither button found — attack didn't go through (stale popup)
         ctx.log_action(
-            f"Battle did not start (screen={screen.screen_type}) — "
+            "Battle did not start (no battle UI detected locally) — "
             "popup was likely stale, refreshing"
         )
         await self.actions.close_popup()
-        await wait(timing.get("monument_popup_wait", 1.5), jitter, "stale popup close")
+        await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "stale popup close")
         return BotState.REFRESHING_POPUP
 
     async def handle_skipping_battle(self, ctx: BotContext, config: dict) -> BotState:
@@ -817,16 +852,25 @@ class StateHandlers:
 
         # Tap skip button (it's fine to tap even if not visible)
         await self.actions.tap_skip_battle()
-        await wait(timing.get("battle_poll_interval", 3.0), jitter, "battle poll")
+        await self._wait(timing.get("battle_poll_interval", 3.0), jitter, "battle poll")
 
         png = await self.capture.capture()
         ctx.last_screenshot = png
 
-        text = self._call_vision(png, "check_battle")
-        ctx.stats.api_calls += 1
-        battle = parse_battle_check(text)
+        # Detect battle end locally — look for OK button (yellow)
+        ok_found = False
+        skip_found = False
+        if self.element_detector is not None:
+            result_elements = self.element_detector.detect(png, "battle_result")
+            ok_found = any(e.name == "ok_button" for e in result_elements)
 
-        if battle.battle_state in ("victory", "defeat", "results_screen"):
+        if ok_found:
+            # Battle result screen is loaded — NOW use vision to read the outcome
+            ctx.log_action("Battle result screen detected locally — reading result with vision")
+            text = self._call_vision(png, "check_battle")
+            ctx.stats.api_calls += 1
+            battle = parse_battle_check(text)
+
             ctx.log_action(f"Battle ended: {battle.battle_state}")
             if battle.battle_state == "victory":
                 ctx.stats.battles_won += 1
@@ -856,8 +900,14 @@ class StateHandlers:
 
             return BotState.POST_BATTLE
 
-        if battle.battle_state == "unknown":
-            # Might not be on a battle screen at all — check via screen identification
+        # No OK button — check if skip button is still visible (battle active)
+        if self.element_detector is not None:
+            battle_elements = self.element_detector.detect(png, "battle_active")
+            skip_found = any(e.name == "skip_battle" for e in battle_elements)
+
+        if not skip_found and not ok_found:
+            # Neither button found — might not be on a battle screen at all
+            # Use vision as fallback to figure out where we are
             text2 = self._call_vision(png, "identify_screen")
             ctx.stats.api_calls += 1
             screen = parse_screen_identification(text2)
@@ -880,7 +930,7 @@ class StateHandlers:
         """
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
-        await wait(timing.get("screen_transition", 2.0), jitter, "post battle wait")
+        await self._wait(timing.get("screen_transition", 2.0), jitter, "post battle wait")
 
         # Wait past any loading screen
         png, screen = await self._wait_past_loading(ctx, config, "post battle")
@@ -907,7 +957,7 @@ class StateHandlers:
                 await self.input.tap(x, y)
             else:
                 await self.input.tap(self._screen_w // 2, self._screen_h // 2)
-            await wait(timing.get("monument_popup_wait", 1.5), jitter, "reopen popup")
+            await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "reopen popup")
             png = await self.capture.capture()
             ctx.last_screenshot = png
 
@@ -966,7 +1016,7 @@ class StateHandlers:
 
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
-        await wait(timing.get("monument_popup_wait", 1.5), jitter, "popup reopen")
+        await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "popup reopen")
 
         return BotState.CHECKING_MONUMENT
 
@@ -995,7 +1045,7 @@ class StateHandlers:
             m, s = divmod(delay, 60)
             h, m = divmod(m, 60)
             ctx.log_action(f"Logged out — restarting in {h}h{m:02d}m{s:02d}s")
-            await wait(float(delay), 0, "logged out restart delay")
+            await self._wait(float(delay), 0, "logged out restart delay")
 
             png = await self.capture.capture()
             ctx.last_screenshot = png
@@ -1003,11 +1053,11 @@ class StateHandlers:
             rx, ry = self.calibrator.get_pixel("restart_button")
             ctx.log_action(f"Tapping Restart button at ({rx}, {ry})")
             await self.input.tap(rx, ry)
-            await wait(timing.get("screen_transition", 2.0), jitter, "restart tap")
+            await self._wait(timing.get("screen_transition", 2.0), jitter, "restart tap")
 
             # Game needs time to load, check for updates, and log in
             ctx.log_action("Waiting for game to load after restart...")
-            await wait(20.0, jitter, "post-restart loading")
+            await self._wait(20.0, jitter, "post-restart loading")
 
             # Wait for home_screen
             for attempt in range(max_retries):
@@ -1024,11 +1074,11 @@ class StateHandlers:
                     ctx.log_action("Still showing logged out popup — retapping Restart")
                     rx, ry = self.calibrator.get_pixel("restart_button")
                     await self.input.tap(rx, ry)
-                    await wait(15.0, jitter, "retry restart loading")
+                    await self._wait(15.0, jitter, "retry restart loading")
                 elif current.screen_type == "loading":
-                    await wait(10.0, jitter, "waiting for load")
+                    await self._wait(10.0, jitter, "waiting for load")
                 else:
-                    await wait(10.0, jitter, "waiting for home screen")
+                    await self._wait(10.0, jitter, "waiting for home screen")
             else:
                 ctx.log_action("Could not reach home screen — going to error recovery")
                 ctx.error_message = "Reconnect failed: home screen not reached"
@@ -1055,7 +1105,7 @@ class StateHandlers:
                 ctx=ctx, config=config, png=png,
             )
             # Even if not "ok", the game might still be loading — proceed
-            await wait(5.0, jitter, "game loading")
+            await self._wait(5.0, jitter, "game loading")
 
         ctx.log_action("Reconnection complete — reinitializing")
         return BotState.INITIALIZING
@@ -1064,65 +1114,37 @@ class StateHandlers:
         """No targets or hibernation active. Sleep then re-check.
 
         Uses a random idle duration (10-120s) to avoid predictable patterns.
-        On resume, presses back to close any open minimap overlay, then
-        reopens it — the game doesn't refresh minimap data unless you do so.
+        On resume, checks locally whether the minimap is still open and routes
+        accordingly.  Monument status only refreshes by opening a monument's
+        popup, so we just clear visited_slots and retry all monuments.
         """
-        timing = config.get("timing", {})
-        jitter = timing.get("jitter_factor", 0.3)
-
         if self._hibernation_seconds is not None and self._hibernation_seconds > 0:
             # Add a 30-second buffer so the timer has fully expired
             sleep_secs = self._hibernation_seconds + 30
             m, s = divmod(sleep_secs, 60)
             h, m = divmod(m, 60)
             ctx.log_action(f"Hibernation sleep — waking in {h}h{m:02d}m{s:02d}s")
-            await wait(float(sleep_secs), 0.05, "hibernation sleep")
+            await self._wait(float(sleep_secs), 0.05, "hibernation sleep")
             self._hibernation_seconds = None
         else:
             idle_secs = random.uniform(10.0, 120.0)
             ctx.log_action(f"Idle — rechecking in {idle_secs:.0f}s")
-            await wait(idle_secs, 0.15, "idle wait")
+            await self._wait(idle_secs, 0.15, "idle wait")
 
-        # Assume the minimap is still open (that's what we were looking at
-        # before going idle).  Close it by tapping the X button at center-bottom
-        # — the game doesn't refresh minimap data unless you close and reopen.
-        # Skip Vision entirely here; OPENING_MINIMAP handles verification locally.
-        ctx.log_action("Resuming from idle — closing minimap overlay via X button")
-        png = await self.capture.capture()
-        ctx.last_screenshot = png
-
-        # Try to find the minimap close button locally
-        self._calibrate_for_screen(png, "minimap", ctx)
-        if self.calibrator.is_calibrated("minimap_close"):
-            cx, cy = self.calibrator.get_pixel("minimap_close")
-            ctx.log_action(f"Tapping minimap X at ({cx}, {cy})")
-            await self.input.tap(cx, cy)
-        else:
-            # Fallback: tap bottom-center where the X typically sits
-            cx = self._screen_w // 2
-            cy = int(self._screen_h * 0.87)
-            ctx.log_action(f"minimap_close not found — tapping bottom-center ({cx}, {cy})")
-            await self.input.tap(cx, cy)
-        await wait(1.5, jitter, "close minimap after idle")
-
-        # Wait past any loading/black screen (no Vision — just brightness check)
-        png = await self._wait_past_loading_local(ctx, config, "idle resume")
-
-        # Sanity check: if minimap squares are still visible, the X tap missed —
-        # try once more at the center-bottom fallback position
-        detection = find_minimap_squares(png)
-        if detection and len(detection.squares) >= 2:
-            ctx.log_action("Minimap still open — retrying X tap at center-bottom")
-            await self.input.tap(self._screen_w // 2, int(self._screen_h * 0.87))
-            await wait(1.5, jitter, "close minimap retry")
-
-        # Clear visited slots so we re-evaluate all monuments
+        # Clear visited slots so we retry all monuments (their popup is the
+        # only way to get real status, so we need to reopen each one).
         self._visited_slots.clear()
 
-        # Go straight to OPENING_MINIMAP — it will capture a fresh screenshot,
-        # tap the minimap button, and verify locally with find_minimap_squares.
-        # If that fails it falls back to Vision identify_screen.
-        ctx.log_action("Opening fresh minimap")
+        # Check locally whether the minimap is still open — no Vision needed
+        png = await self.capture.capture()
+        ctx.last_screenshot = png
+        detection = find_minimap_squares(png)
+
+        if detection and len(detection.squares) >= 2:
+            ctx.log_action("Resuming from idle — minimap still open, re-reading")
+            return BotState.READING_MINIMAP
+
+        ctx.log_action("Resuming from idle — opening minimap")
         return BotState.OPENING_MINIMAP
 
     async def handle_error_recovery(self, ctx: BotContext, config: dict) -> BotState:
@@ -1142,7 +1164,7 @@ class StateHandlers:
 
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
-        await wait(timing.get("error_recovery_wait", 3.0), jitter, "error recovery")
+        await self._wait(timing.get("error_recovery_wait", 3.0), jitter, "error recovery")
 
         # Strategy 1: Identify current screen (wait past loading)
         try:
@@ -1167,7 +1189,7 @@ class StateHandlers:
         # Strategy 2: Try back button
         ctx.log_action("Recovery: pressing back")
         await self.actions.press_back()
-        await wait(2.0, jitter, "recovery back")
+        await self._wait(2.0, jitter, "recovery back")
 
         # Strategy 3: Restart from minimap
         ctx.log_action("Recovery: restarting from minimap")
@@ -1175,7 +1197,7 @@ class StateHandlers:
 
     async def handle_paused(self, ctx: BotContext, config: dict) -> BotState:
         """Do nothing while paused. StateMachine handles resume."""
-        await wait(1.0, 0, "paused")
+        await asyncio.sleep(1.0)  # not self._wait() — must not interrupt while paused
         return BotState.PAUSED
 
     async def handle_stopped(self, ctx: BotContext, config: dict) -> BotState:

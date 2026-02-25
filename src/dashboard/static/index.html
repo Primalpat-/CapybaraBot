@@ -129,8 +129,31 @@
         .action-entry { padding: 2px 0; border-bottom: 1px solid #0f3460; }
         .action-entry .time { color: #666; margin-right: 8px; }
 
+        .monuments-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+        }
+        .monument-card {
+            background: #1a1a2e;
+            padding: 12px;
+            border-radius: 6px;
+            text-align: center;
+            border-left: 4px solid #555;
+        }
+        .monument-card.status-enemy { border-left-color: #e57373; }
+        .monument-card.status-friendly { border-left-color: #81c784; }
+        .monument-card .slot-label { font-weight: bold; font-size: 1.1em; }
+        .monument-card .status-text { font-size: 0.85em; margin: 6px 0; }
+        .monument-card .status-text.enemy { color: #e57373; }
+        .monument-card .status-text.friendly { color: #81c784; }
+        .monument-card .status-text.unknown { color: #888; }
+        .monument-card .timer { font-size: 0.8em; color: #8899aa; }
+        .monument-card .flip-count { font-size: 0.75em; color: #ffb74d; margin-top: 4px; }
+
         @media (max-width: 768px) {
             .container { grid-template-columns: 1fr; }
+            .monuments-grid { grid-template-columns: repeat(2, 1fr); }
         }
     </style>
 </head>
@@ -188,6 +211,11 @@
             </div>
         </div>
 
+        <div class="panel full-width">
+            <h2>Monuments</h2>
+            <div class="monuments-grid" id="monuments-grid"></div>
+        </div>
+
         <div class="panel">
             <h2>Live Screenshot</h2>
             <div class="screenshot-container">
@@ -210,6 +238,13 @@
         function formatTime(ts) {
             const d = new Date(ts * 1000);
             return d.toLocaleTimeString();
+        }
+
+        function formatTimeSince(ts) {
+            const secs = Math.floor(Date.now() / 1000 - ts);
+            if (secs < 60) return `${secs}s ago`;
+            if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+            return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m ago`;
         }
 
         function formatRuntime(seconds) {
@@ -259,6 +294,24 @@
                 logEl.innerHTML = (data.action_log || []).slice(-30).reverse().map(e =>
                     `<div class="action-entry"><span class="time">${formatTime(e.time)}</span>${e.message}</div>`
                 ).join('');
+
+                // Monuments
+                const grid = document.getElementById('monuments-grid');
+                if (data.monuments) {
+                    grid.innerHTML = Object.values(data.monuments).map(m => {
+                        const ago = m.last_checked > 0
+                            ? formatTimeSince(m.last_checked)
+                            : 'Never';
+                        const statusClass = m.last_status === 'unknown' ? '' : `status-${m.last_status}`;
+                        return `<div class="monument-card ${statusClass}">
+                            <div class="slot-label">Slot ${m.slot}</div>
+                            <div class="status-text ${m.last_status}">${m.last_status.toUpperCase()}</div>
+                            <div class="owner">${m.owner_name || '\u2014'}</div>
+                            <div class="timer">Checked: ${ago}</div>
+                            <div class="flip-count">Flips: ${m.flipped_to_enemy}</div>
+                        </div>`;
+                    }).join('');
+                }
 
             } catch (e) { /* ignore */ }
         }

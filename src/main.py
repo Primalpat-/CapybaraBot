@@ -77,7 +77,7 @@ def build_components(config: dict):
 
     state_machine = StateMachine(config)
 
-    handlers = StateHandlers(capture, adb_input, vision, cache, actions, config, calibrator, element_detector)
+    handlers = StateHandlers(capture, adb_input, vision, cache, actions, config, calibrator, element_detector, state_machine)
 
     return connection, state_machine, handlers, vision, calibrator, adb_input, capture
 
