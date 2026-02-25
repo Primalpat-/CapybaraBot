@@ -98,14 +98,16 @@ class TestNeedsCalibration:
 
     def test_minimap_grid_refs(self, calibrator):
         needed = calibrator.needs_calibration("minimap")
-        assert len(needed) == 2
+        assert len(needed) == 3
         assert "minimap_square_topleft" in needed
         assert "minimap_square_bottomright" in needed
+        assert "minimap_close" in needed
 
     def test_minimap_grid_refs_partial(self, calibrator):
         calibrator.store("minimap_square_topleft", 25.0, 35.0, 0.9)
         needed = calibrator.needs_calibration("minimap")
-        assert needed == ["minimap_square_bottomright"]
+        assert "minimap_square_bottomright" in needed
+        assert "minimap_close" in needed
 
     def test_arrived_at_monument(self, calibrator):
         needed = calibrator.needs_calibration("arrived_at_monument")

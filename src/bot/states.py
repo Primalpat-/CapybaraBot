@@ -1083,31 +1083,47 @@ class StateHandlers:
             ctx.log_action(f"Idle — rechecking in {idle_secs:.0f}s")
             await wait(idle_secs, 0.15, "idle wait")
 
-        # Close minimap overlay if open — the game doesn't refresh minimap
-        # data unless you close and reopen it
-        await self.actions.press_back()
-        await wait(1.5, jitter, "close overlay after idle")
+        # Assume the minimap is still open (that's what we were looking at
+        # before going idle).  Close it by tapping the X button at center-bottom
+        # — the game doesn't refresh minimap data unless you close and reopen.
+        # Skip Vision entirely here; OPENING_MINIMAP handles verification locally.
+        ctx.log_action("Resuming from idle — closing minimap overlay via X button")
+        png = await self.capture.capture()
+        ctx.last_screenshot = png
 
-        # Re-check the screen (wait past loading if needed)
-        png, screen = await self._wait_past_loading(ctx, config, "idle recheck")
+        # Try to find the minimap close button locally
+        self._calibrate_for_screen(png, "minimap", ctx)
+        if self.calibrator.is_calibrated("minimap_close"):
+            cx, cy = self.calibrator.get_pixel("minimap_close")
+            ctx.log_action(f"Tapping minimap X at ({cx}, {cy})")
+            await self.input.tap(cx, cy)
+        else:
+            # Fallback: tap bottom-center where the X typically sits
+            cx = self._screen_w // 2
+            cy = int(self._screen_h * 0.87)
+            ctx.log_action(f"minimap_close not found — tapping bottom-center ({cx}, {cy})")
+            await self.input.tap(cx, cy)
+        await wait(1.5, jitter, "close minimap after idle")
 
-        if screen.screen_type == "hibernation":
-            return self._enter_hibernation(screen, ctx)
+        # Wait past any loading/black screen (no Vision — just brightness check)
+        png = await self._wait_past_loading_local(ctx, config, "idle resume")
 
-        if screen.screen_type == "logged_out":
-            ctx.log_action("Logged out detected — entering reconnection flow")
-            return BotState.RECONNECTING
+        # Sanity check: if minimap squares are still visible, the X tap missed —
+        # try once more at the center-bottom fallback position
+        detection = find_minimap_squares(png)
+        if detection and len(detection.squares) >= 2:
+            ctx.log_action("Minimap still open — retrying X tap at center-bottom")
+            await self.input.tap(self._screen_w // 2, int(self._screen_h * 0.87))
+            await wait(1.5, jitter, "close minimap retry")
 
-        # Force a fresh minimap read — go through OPENING_MINIMAP so data
-        # is never stale
-        if screen.screen_type in ("main_map", "minimap", "unknown"):
-            ctx.log_action(f"Resuming from idle (screen={screen.screen_type}) — reopening minimap")
-            self._visited_slots.clear()
-            return BotState.OPENING_MINIMAP
+        # Clear visited slots so we re-evaluate all monuments
+        self._visited_slots.clear()
 
-        # Some other screen — let INITIALIZING figure it out
-        ctx.log_action(f"Resuming from idle (screen={screen.screen_type})")
-        return BotState.INITIALIZING
+        # Go straight to OPENING_MINIMAP — it will capture a fresh screenshot,
+        # tap the minimap button, and verify locally with find_minimap_squares.
+        # If that fails it falls back to Vision identify_screen.
+        ctx.log_action("Opening fresh minimap")
+        return BotState.OPENING_MINIMAP
 
     async def handle_error_recovery(self, ctx: BotContext, config: dict) -> BotState:
         """Multi-strategy error recovery."""

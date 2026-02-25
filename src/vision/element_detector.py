@@ -87,6 +87,10 @@ _COLOR_ELEMENTS: dict[tuple[str, str], dict] = {
         "strategy": "shape",
         "region": _BOTTOM_CENTER_STRIP,
     },
+    ("minimap", "minimap_close"): {
+        "strategy": "shape",
+        "region": _BOTTOM_CENTER_STRIP,
+    },
     ("occupy_prompt", "occupy_cancel_button"): {
         "region": _LEFT_HALF,
         "hsv_lower": _PINK_LOWER,

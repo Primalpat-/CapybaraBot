@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # For "minimap", we calibrate two GRID REFERENCE points and derive all 4 slots.
 SCREEN_ELEMENTS: dict[str, list[str]] = {
     "main_map": ["minimap_button"],
-    "minimap": ["minimap_square_topleft", "minimap_square_bottomright"],
+    "minimap": ["minimap_square_topleft", "minimap_square_bottomright", "minimap_close"],
     "arrived_at_monument": ["world_monument"],
     "monument_popup": ["action_button", "close_popup"],
     "battle_active": ["skip_battle"],
@@ -57,6 +57,10 @@ ELEMENT_DESCRIPTIONS: dict[str, str] = {
         "The close/X button on the monument popup — a small X icon "
         "in the upper-right corner of the popup overlay. "
         "Return the exact center of the X icon itself."
+    ),
+    "minimap_close": (
+        "The small circular X button at the bottom-center of the minimap overlay. "
+        "This button closes the minimap. Return the exact center of the X icon."
     ),
     "skip_battle": (
         "The green 'Skip' button on the RIGHT side of the bottom area of the "
