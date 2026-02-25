@@ -615,23 +615,14 @@ class StateHandlers:
         logger.info(f"Tapping monument slot {target_slot} at ({x}, {y})")
         await self.input.tap(x, y)
 
-        timing = config.get("timing", {})
-        jitter = timing.get("jitter_factor", 0.3)
-        await self._wait(timing.get("screen_transition", 2.0), jitter, "monument tap")
-
-        # Verify the minimap closed locally — if squares still visible, tap missed
-        png = await self.capture.capture()
-        ctx.last_screenshot = png
-
-        still_open = find_minimap_squares(png)
-        if still_open and len(still_open.squares) >= 2:
-            ctx.log_action(
-                f"Minimap still open after tapping slot {target_slot} — will retry"
-            )
-            return BotState.READING_MINIMAP
-
-        ctx.log_action("Minimap closed — navigation started")
+        # No verify needed — we have precise coordinates from detection and the
+        # tap almost always works.  Verifying caused a race condition: if the
+        # minimap closing animation was still playing, find_minimap_squares would
+        # report "still open" → READING_MINIMAP → detection fails (now closed)
+        # → OPENING_MINIMAP → reopens minimap → cancels navigation.
+        # If the tap missed, APPROACHING_MONUMENT's retry loop handles it.
         self._retries_without_progress = 0
+        ctx.log_action("Minimap slot tapped — navigation started")
         return BotState.NAVIGATING
 
     async def handle_navigating(self, ctx: BotContext, config: dict) -> BotState:
