@@ -829,9 +829,23 @@ class StateHandlers:
                 ctx.log_action("Battle started (detected skip button locally)")
             return BotState.SKIPPING_BATTLE
 
-        # Neither button found — attack didn't go through (stale popup)
+        # Neither button found locally — fall back to Vision before giving up
+        ctx.log_action("No battle UI detected locally — verifying with Vision")
+        text = self._call_vision(png, "identify_screen")
+        ctx.stats.api_calls += 1
+        screen = parse_screen_identification(text)
+
+        if screen.screen_type in ("battle_active", "battle_result"):
+            ctx.stats.battles_fought += 1
+            if screen.screen_type == "battle_result":
+                ctx.log_action("Battle already finished (Vision fallback)")
+            else:
+                ctx.log_action("Battle started (Vision fallback)")
+            return BotState.SKIPPING_BATTLE
+
+        # Vision also says not a battle — popup was stale
         ctx.log_action(
-            "Battle did not start (no battle UI detected locally) — "
+            f"Battle did not start (screen={screen.screen_type}) — "
             "popup was likely stale, refreshing"
         )
         await self.actions.close_popup()

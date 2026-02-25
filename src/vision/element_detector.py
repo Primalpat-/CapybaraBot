@@ -49,6 +49,12 @@ _YELLOW_UPPER = np.array([30, 255, 255])
 _GREEN_LOWER = np.array([40, 80, 120])
 _GREEN_UPPER = np.array([80, 255, 255])
 
+# The skip button can appear as a dark teal/blue depending on the game's
+# rendering state (animations, overlays).  Measured from real screenshots:
+# H≈120-135, S≈70-140, V≈80-160.
+_DARK_TEAL_LOWER = np.array([118, 65, 75])
+_DARK_TEAL_UPPER = np.array([138, 150, 165])
+
 _PINK_LOWER = np.array([155, 60, 150])
 _PINK_UPPER = np.array([175, 255, 255])
 
@@ -73,8 +79,10 @@ _COLOR_ELEMENTS: dict[tuple[str, str], dict] = {
     },
     ("battle_active", "skip_battle"): {
         "region": _BOTTOM_RIGHT,
-        "hsv_lower": _GREEN_LOWER,
-        "hsv_upper": _GREEN_UPPER,
+        "hsv_ranges": [
+            (_GREEN_LOWER, _GREEN_UPPER),          # bright green (normal)
+            (_DARK_TEAL_LOWER, _DARK_TEAL_UPPER),  # dark teal (dimmed/overlay)
+        ],
         "min_area_frac": 0.001,
     },
     ("monument_popup", "action_button"): {
@@ -165,8 +173,10 @@ class ElementDetector:
                 else:
                     det = self._detect_color(
                         hsv, w, h, element_name,
-                        cfg["region"], cfg["hsv_lower"], cfg["hsv_upper"],
+                        cfg["region"],
+                        cfg.get("hsv_lower"), cfg.get("hsv_upper"),
                         cfg.get("min_area_frac", 0.001),
+                        hsv_ranges=cfg.get("hsv_ranges"),
                     )
                 if det:
                     results.append(det)
@@ -231,8 +241,10 @@ class ElementDetector:
     @staticmethod
     def _detect_color(
         hsv: np.ndarray, w: int, h: int,
-        name: str, region: tuple, hsv_lower: np.ndarray, hsv_upper: np.ndarray,
+        name: str, region: tuple,
+        hsv_lower: np.ndarray | None, hsv_upper: np.ndarray | None,
         min_area_frac: float,
+        hsv_ranges: list[tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> DetectedElement | None:
         """Find largest color blob in a constrained region."""
         rx1 = int(region[0] * w)
@@ -241,7 +253,15 @@ class ElementDetector:
         ry2 = int(region[3] * h)
 
         roi = hsv[ry1:ry2, rx1:rx2]
-        mask = cv2.inRange(roi, hsv_lower, hsv_upper)
+
+        # Smooth to reduce noise from text, gradients, and anti-aliasing
+        roi = cv2.GaussianBlur(roi, (5, 5), 0)
+
+        # Build mask — OR-combine multiple HSV ranges if provided
+        ranges = hsv_ranges if hsv_ranges else [(hsv_lower, hsv_upper)]
+        mask = np.zeros(roi.shape[:2], dtype=np.uint8)
+        for lo, hi in ranges:
+            mask |= cv2.inRange(roi, lo, hi)
 
         # Clean up noise
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
