@@ -2,6 +2,7 @@
 
 import io
 import logging
+import random
 import time
 from pathlib import Path
 
@@ -65,6 +66,7 @@ class StateHandlers:
         self._screen_w = config.get("screen", {}).get("width", 1080)
         self._screen_h = config.get("screen", {}).get("height", 1920)
         self._minimap_open_attempts = 0
+        self._retries_without_progress = 0  # consecutive failures across states
         self._hibernation_seconds: int | None = None  # countdown from last detection
         self._unbeatable_players: set[str] = set()  # players we've lost to
 
@@ -80,9 +82,9 @@ class StateHandlers:
         x, y = self.calibrator.get_pixel("ok_button")
         ctx.log_action(f"Tapping OK button at ({x}, {y})")
         for tap_x, tap_y in [(x, y), (self._screen_w // 2, int(self._screen_h * 0.85))]:
-            await self.input.tap(tap_x, tap_y, jitter=0)
+            await self.input.tap(tap_x, tap_y)
             await wait(1.0, jitter, "ok button tap")
-            await self.input.tap(tap_x, tap_y, jitter=0)
+            await self.input.tap(tap_x, tap_y)
             await wait(1.0, jitter, "ok button retry")
 
         # Wait past the post-OK loading screen locally — no Vision needed
@@ -100,7 +102,7 @@ class StateHandlers:
         self._calibrate_for_screen(png, "occupy_prompt", ctx)
         x, y = self.calibrator.get_pixel("occupy_cancel_button")
         ctx.log_action(f"Occupy prompt — tapping Cancel at ({x}, {y})")
-        await self.input.tap(x, y, jitter=0)
+        await self.input.tap(x, y)
         await wait(timing.get("screen_transition", 2.0), jitter, "occupy cancel")
 
     # Offsets for tap-and-verify spiral: center, cardinal, diagonal
@@ -153,7 +155,7 @@ class StateHandlers:
                     f"offset ({dx:+d}, {dy:+d}) → ({tx}, {ty})"
                 )
 
-            await self.input.tap(tx, ty, jitter=0)
+            await self.input.tap(tx, ty)
             await wait(tap_wait, jitter, f"{element_name} verify")
 
             # Check what screen we're on now
@@ -458,6 +460,18 @@ class StateHandlers:
         jitter = timing.get("jitter_factor", 0.3)
 
         self._minimap_open_attempts += 1
+        self._retries_without_progress += 1
+
+        # Too many consecutive failures — cool down
+        max_retries = config.get("bot", {}).get("max_idle_retries", 8)
+        if self._retries_without_progress > max_retries:
+            ctx.log_action(
+                f"Too many retries without progress ({self._retries_without_progress}) "
+                f"— cooling down in idle"
+            )
+            self._minimap_open_attempts = 0
+            self._retries_without_progress = 0
+            return BotState.IDLE
 
         if self._minimap_open_attempts > 2:
             ctx.log_action(
@@ -478,7 +492,7 @@ class StateHandlers:
         # Single tap — no offset loop (minimap is an overlay)
         bx, by = self.calibrator.get_pixel("minimap_button")
         ctx.log_action(f"Tapping minimap_button at ({bx}, {by})")
-        await self.input.tap(bx, by, jitter=0)
+        await self.input.tap(bx, by)
         await wait(tap_wait, jitter, "minimap open")
 
         # Capture after tap and wait past any loading
@@ -624,6 +638,7 @@ class StateHandlers:
             return BotState.READING_MINIMAP
 
         ctx.log_action("Minimap closed — navigation started")
+        self._retries_without_progress = 0
         return BotState.NAVIGATING
 
     async def handle_navigating(self, ctx: BotContext, config: dict) -> BotState:
@@ -747,6 +762,7 @@ class StateHandlers:
                         await self.actions.close_popup()
                         return BotState.OPENING_MINIMAP
             ctx.log_action(f"Attacking! (button: {info.action_button.text})")
+            self._retries_without_progress = 0
             return BotState.ATTACKING
 
         ctx.log_action("No attack available — moving on")
@@ -1045,19 +1061,32 @@ class StateHandlers:
         return BotState.INITIALIZING
 
     async def handle_idle(self, ctx: BotContext, config: dict) -> BotState:
-        """No targets or hibernation active. Sleep then re-check."""
+        """No targets or hibernation active. Sleep then re-check.
+
+        Uses a random idle duration (10-120s) to avoid predictable patterns.
+        On resume, presses back to close any open minimap overlay, then
+        reopens it — the game doesn't refresh minimap data unless you do so.
+        """
+        timing = config.get("timing", {})
+        jitter = timing.get("jitter_factor", 0.3)
+
         if self._hibernation_seconds is not None and self._hibernation_seconds > 0:
             # Add a 30-second buffer so the timer has fully expired
             sleep_secs = self._hibernation_seconds + 30
             m, s = divmod(sleep_secs, 60)
             h, m = divmod(m, 60)
             ctx.log_action(f"Hibernation sleep — waking in {h}h{m:02d}m{s:02d}s")
-            await wait(float(sleep_secs), 0, "hibernation sleep")
+            await wait(float(sleep_secs), 0.05, "hibernation sleep")
             self._hibernation_seconds = None
         else:
-            idle_interval = config.get("timing", {}).get("idle_recheck_interval", 60.0)
-            ctx.log_action(f"Idle — rechecking in {idle_interval:.0f}s")
-            await wait(idle_interval, 0, "idle wait")
+            idle_secs = random.uniform(10.0, 120.0)
+            ctx.log_action(f"Idle — rechecking in {idle_secs:.0f}s")
+            await wait(idle_secs, 0.15, "idle wait")
+
+        # Close minimap overlay if open — the game doesn't refresh minimap
+        # data unless you close and reopen it
+        await self.actions.press_back()
+        await wait(1.5, jitter, "close overlay after idle")
 
         # Re-check the screen (wait past loading if needed)
         png, screen = await self._wait_past_loading(ctx, config, "idle recheck")
@@ -1069,12 +1098,31 @@ class StateHandlers:
             ctx.log_action("Logged out detected — entering reconnection flow")
             return BotState.RECONNECTING
 
-        ctx.log_action(f"Screen changed to {screen.screen_type} — resuming")
+        # Force a fresh minimap read — go through OPENING_MINIMAP so data
+        # is never stale
+        if screen.screen_type in ("main_map", "minimap", "unknown"):
+            ctx.log_action(f"Resuming from idle (screen={screen.screen_type}) — reopening minimap")
+            self._visited_slots.clear()
+            return BotState.OPENING_MINIMAP
+
+        # Some other screen — let INITIALIZING figure it out
+        ctx.log_action(f"Resuming from idle (screen={screen.screen_type})")
         return BotState.INITIALIZING
 
     async def handle_error_recovery(self, ctx: BotContext, config: dict) -> BotState:
         """Multi-strategy error recovery."""
+        self._retries_without_progress += 1
         ctx.log_action(f"Error recovery: {ctx.error_message}")
+
+        # Too many consecutive failures — cool down in idle
+        max_retries = config.get("bot", {}).get("max_idle_retries", 8)
+        if self._retries_without_progress > max_retries:
+            ctx.log_action(
+                f"Too many retries without progress ({self._retries_without_progress}) "
+                f"— cooling down in idle"
+            )
+            self._retries_without_progress = 0
+            return BotState.IDLE
 
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
