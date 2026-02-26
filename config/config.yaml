@@ -82,11 +82,11 @@ bot:
   # Max monuments per session (0 = unlimited)
   max_monuments: 0
   # Seconds to wait before restarting after logged-out detection (10 min)
-  logged_out_restart_delay: 15
+  logged_out_restart_delay: 600
   # Consecutive retries without progress before going idle to cool down
   max_idle_retries: 8
   # Clear all calibrated coordinates on bot startup (useful during testing)
-  clear_calibration_on_start: true
+  clear_calibration_on_start: false
   # App crash recovery
   app_package: "com.habby.capybara"  # find with: adb shell pm list packages | grep -i capy
   # Stagnation detection
