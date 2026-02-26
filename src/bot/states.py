@@ -29,6 +29,7 @@ from src.vision.parser import (
     parse_monument_info,
     parse_post_battle,
     parse_calibration_result,
+    parse_recovery_guidance,
     parse_timer_seconds,
 )
 from src.vision.prompts import get_prompt
@@ -122,6 +123,40 @@ class StateHandlers:
         ctx.log_action(f"Occupy prompt — tapping Cancel at ({x}, {y})")
         await self.input.tap(x, y)
         await self._wait(timing.get("screen_transition", 2.0), jitter, "occupy cancel")
+
+    async def _launch_app(self, ctx: BotContext, config: dict) -> bool:
+        """Launch the game app via ADB monkey command.
+
+        Falls back to Vision-calibrated app_icon tap if ADB launch fails.
+        Returns True if the launch command succeeded.
+        """
+        package = config.get("bot", {}).get("app_package", "com.habby.capybara")
+        try:
+            stdout, stderr, rc = await self.input.connection.run_adb(
+                "shell", "monkey", "-p", package,
+                "-c", "android.intent.category.LAUNCHER", "1"
+            )
+            if rc == 0:
+                ctx.log_action(f"Launched app via ADB: {package}")
+                return True
+            logger.warning(f"ADB monkey launch failed (rc={rc}): {stderr}")
+        except Exception as e:
+            logger.warning(f"ADB monkey launch error: {e}")
+
+        # Fallback: Vision-calibrate android_home screen and tap app_icon
+        try:
+            png = await self.capture.capture()
+            ctx.last_screenshot = png
+            self._calibrate_for_screen(png, "android_home", ctx)
+            x, y = self.calibrator.get_pixel("app_icon")
+            if x > 0 and y > 0:
+                ctx.log_action(f"Tapping app icon at ({x}, {y}) (ADB fallback)")
+                await self.input.tap(x, y)
+                return True
+        except Exception as e:
+            logger.warning(f"Vision app icon fallback failed: {e}")
+
+        return False
 
     # Offsets for tap-and-verify spiral: center, cardinal, diagonal
     _TAP_OFFSETS = [
@@ -441,6 +476,7 @@ class StateHandlers:
           logged_out       → RECONNECTING       Wait delay → Restart → Star Trek → Alien Minefield
           home_screen      → RECONNECTING       Star Trek → Alien Minefield
           mode_select      → RECONNECTING       Alien Minefield
+          android_home     → RECONNECTING       Launch app via ADB → navigate to game
           occupy_prompt    → tap Cancel → INITIALIZING  Never swap, re-identify screen
           loading/menu/unknown → OPENING_MINIMAP  Fallback — retry from minimap
 
@@ -465,7 +501,7 @@ class StateHandlers:
             return self._enter_hibernation(screen, ctx)
         elif screen.screen_type == "dormant_period":
             return self._enter_dormant(screen, ctx)
-        elif screen.screen_type in ("logged_out", "home_screen", "mode_select"):
+        elif screen.screen_type in ("logged_out", "home_screen", "mode_select", "android_home"):
             ctx.log_action(f"Not in game ({screen.screen_type}) — entering reconnection flow")
             return BotState.RECONNECTING
         elif screen.screen_type == "minimap":
@@ -761,6 +797,9 @@ class StateHandlers:
             rec.check_count += 1
             rec.last_status = new_status
             rec.owner_name = info.ownership_text or info.ownership or ""
+            # Monument check counts as meaningful progress
+            ctx.last_progress_time = time.time()
+            ctx.stagnation_recovery_attempts = 0
 
             # Track consecutive enemy checks
             if new_status == "enemy":
@@ -959,6 +998,8 @@ class StateHandlers:
             if any(e.name == "occupy_cancel_button" for e in occupy_els):
                 await self._dismiss_occupy_prompt(png, ctx, config)
                 ctx.stats.monuments_captured += 1
+                ctx.last_progress_time = time.time()
+                ctx.stagnation_recovery_attempts = 0
                 slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
                 if slot in ctx.monument_tracker:
                     rec = ctx.monument_tracker[slot]
@@ -1011,6 +1052,8 @@ class StateHandlers:
             )
             if still_active:
                 ctx.stats.defeats += 1
+                ctx.last_progress_time = time.time()
+                ctx.stagnation_recovery_attempts = 0
                 slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
                 if self._event_logger:
                     self._event_logger.log(
@@ -1036,6 +1079,8 @@ class StateHandlers:
             else:
                 # Defender was defeated — it's a victory
                 ctx.stats.battles_won += 1
+                ctx.last_progress_time = time.time()
+                ctx.stagnation_recovery_attempts = 0
                 slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
                 if self._event_logger:
                     self._event_logger.log(
@@ -1049,6 +1094,8 @@ class StateHandlers:
         # Check if the monument is now ours (blue "Star Spirit" ownership)
         if info.is_friendly:
             ctx.stats.monuments_captured += 1
+            ctx.last_progress_time = time.time()
+            ctx.stagnation_recovery_attempts = 0
             slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
             if slot in ctx.monument_tracker:
                 rec = ctx.monument_tracker[slot]
@@ -1110,6 +1157,7 @@ class StateHandlers:
         """Handle navigation back into Alien Minefield.
 
         Entered when:
+        - 'android_home' detected (app crashed — launch via ADB)
         - 'logged_out' popup detected (needs delay + restart)
         - 'home_screen' detected (needs Star Trek → Alien Minefield)
         - 'mode_select' detected (needs Alien Minefield tap)
@@ -1123,6 +1171,38 @@ class StateHandlers:
         # Determine where we are right now (wait past loading)
         png, current = await self._wait_past_loading(ctx, config, "reconnect start")
         ctx.log_action(f"Reconnect: starting on {current.screen_type}")
+
+        # ── Step 0: If android_home, launch app via ADB ──────────────
+        if current.screen_type == "android_home":
+            ctx.log_action("Android home detected — launching app")
+            launched = await self._launch_app(ctx, config)
+            if not launched:
+                ctx.error_message = "Failed to launch app from Android home"
+                return BotState.ERROR_RECOVERY
+
+            # Wait for the game to load
+            await self._wait(20.0, jitter, "app launch loading")
+
+            # Poll for game screen
+            for attempt in range(max_retries):
+                png = await self.capture.capture()
+                ctx.last_screenshot = png
+                text = self._call_vision(png, "identify_screen")
+                ctx.stats.api_calls += 1
+                current = parse_screen_identification(text)
+                ctx.log_action(f"Reconnect post-launch: screen={current.screen_type} (attempt {attempt + 1})")
+
+                if current.screen_type in ("home_screen", "mode_select", "main_map"):
+                    break
+                elif current.screen_type == "android_home":
+                    ctx.log_action("Still on Android home — launch may have failed")
+                    ctx.error_message = "App did not launch from Android home"
+                    return BotState.ERROR_RECOVERY
+                else:
+                    await self._wait(10.0, jitter, "waiting for game after launch")
+            else:
+                ctx.error_message = "Reconnect failed: game not reached after app launch"
+                return BotState.ERROR_RECOVERY
 
         # ── Step 1: If logged_out, wait then tap Restart ─────────────
         if current.screen_type == "logged_out":
@@ -1265,8 +1345,8 @@ class StateHandlers:
 
             ctx.log_action(f"Recovery: detected {screen.screen_type}")
 
-            if screen.screen_type == "logged_out":
-                ctx.log_action("Logged out detected — entering reconnection flow")
+            if screen.screen_type in ("logged_out", "android_home", "home_screen", "mode_select"):
+                ctx.log_action(f"{screen.screen_type} detected — entering reconnection flow")
                 return BotState.RECONNECTING
             elif screen.screen_type == "minimap":
                 return BotState.READING_MINIMAP
@@ -1287,6 +1367,85 @@ class StateHandlers:
         # Strategy 3: Restart from minimap
         ctx.log_action("Recovery: restarting from minimap")
         return BotState.OPENING_MINIMAP
+
+    async def handle_stagnation_recovery(self, ctx: BotContext, config: dict) -> BotState:
+        """Vision-guided recovery when the bot has been stuck without progress.
+
+        1. Identify the current screen.
+        2. If it's a known screen, route to the normal handler.
+        3. If unknown, ask Vision for recovery guidance and follow its advice.
+        4. Return to INITIALIZING to re-identify after taking action.
+        """
+        timing = config.get("timing", {})
+        jitter = timing.get("jitter_factor", 0.3)
+
+        ctx.log_action(
+            f"Stagnation recovery attempt {ctx.stagnation_recovery_attempts}"
+        )
+        if self._event_logger:
+            self._event_logger.log(
+                "stagnation_recovery",
+                attempt=ctx.stagnation_recovery_attempts,
+            )
+
+        # Take screenshot and identify screen
+        png, screen = await self._wait_past_loading(ctx, config, "stagnation recovery")
+        ctx.log_action(f"Stagnation recovery: screen={screen.screen_type}")
+
+        # If it's a recognizable screen, route normally
+        if screen.screen_type in ("android_home", "logged_out", "home_screen", "mode_select"):
+            return BotState.RECONNECTING
+        elif screen.screen_type == "minimap":
+            return BotState.READING_MINIMAP
+        elif screen.screen_type == "main_map":
+            return BotState.OPENING_MINIMAP
+        elif screen.screen_type == "monument_popup":
+            return BotState.CHECKING_MONUMENT
+        elif screen.screen_type == "battle_active":
+            return BotState.SKIPPING_BATTLE
+        elif screen.screen_type == "battle_result":
+            await self._tap_ok_button(png, ctx, config)
+            return BotState.POST_BATTLE
+        elif screen.screen_type == "hibernation":
+            return self._enter_hibernation(screen, ctx)
+        elif screen.screen_type == "dormant_period":
+            return self._enter_dormant(screen, ctx)
+        elif screen.screen_type == "occupy_prompt":
+            await self._dismiss_occupy_prompt(png, ctx, config)
+            return BotState.INITIALIZING
+
+        # Unknown screen — ask Vision for guidance
+        ctx.log_action("Unknown screen — requesting recovery guidance from Vision")
+        text = self._call_vision(png, "recovery_guidance")
+        ctx.stats.api_calls += 1
+        guidance = parse_recovery_guidance(text)
+
+        ctx.log_action(
+            f"Recovery guidance: {guidance.suggested_action} "
+            f"({guidance.diagnosis}, confidence={guidance.confidence:.2f})"
+        )
+
+        if guidance.suggested_action == "tap" and guidance.confidence >= 0.3:
+            tx = int(guidance.tap_x_percent / 100 * self._screen_w)
+            ty = int(guidance.tap_y_percent / 100 * self._screen_h)
+            ctx.log_action(f"Recovery: tapping ({tx}, {ty}) — {guidance.tap_description}")
+            await self.input.tap(tx, ty)
+            await self._wait(timing.get("screen_transition", 2.0), jitter, "recovery tap")
+        elif guidance.suggested_action == "back":
+            ctx.log_action("Recovery: pressing back")
+            await self.actions.press_back()
+            await self._wait(2.0, jitter, "recovery back")
+        elif guidance.suggested_action == "wait":
+            ctx.log_action("Recovery: waiting for loading")
+            await self._wait(10.0, jitter, "recovery wait")
+        elif guidance.suggested_action == "launch_app":
+            ctx.log_action("Recovery: launching app")
+            await self._launch_app(ctx, config)
+            await self._wait(20.0, jitter, "recovery app launch")
+        else:
+            ctx.log_action(f"Recovery: no actionable guidance ({guidance.suggested_action})")
+
+        return BotState.INITIALIZING
 
     async def handle_paused(self, ctx: BotContext, config: dict) -> BotState:
         """Do nothing while paused. StateMachine handles resume."""

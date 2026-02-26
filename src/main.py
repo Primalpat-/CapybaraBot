@@ -105,6 +105,7 @@ def register_all_handlers(sm: StateMachine, handlers: StateHandlers) -> None:
     sm.register_handler(BotState.RECONNECTING, handlers.handle_reconnecting)
     sm.register_handler(BotState.IDLE, handlers.handle_idle)
     sm.register_handler(BotState.ERROR_RECOVERY, handlers.handle_error_recovery)
+    sm.register_handler(BotState.STAGNATION_RECOVERY, handlers.handle_stagnation_recovery)
     sm.register_handler(BotState.PAUSED, handlers.handle_paused)
     sm.register_handler(BotState.STOPPED, handlers.handle_stopped)
 

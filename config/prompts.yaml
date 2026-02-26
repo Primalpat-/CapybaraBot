@@ -40,10 +40,14 @@ identify_screen:
       popup text mentions abandoning an already occupied monument and asks "continue to
       occupy?". It has a pink/red "Cancel" button on the left and a yellow/orange "OK"
       button on the right. This appears after clearing all defenders from a monument.
+    - "android_home": The Android home screen / launcher is visible. You see app icons
+      in a grid, a dock bar at the bottom, and a wallpaper background. There is NO game
+      content — no capybara characters, no monuments, no game UI. The game app has
+      crashed or been closed.
 
     Return JSON only:
     {
-      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, dormant_period, logged_out, home_screen, mode_select, occupy_prompt, loading, menu, unknown>",
+      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, dormant_period, logged_out, home_screen, mode_select, occupy_prompt, android_home, loading, menu, unknown>",
       "confidence": <0.0-1.0>,
       "details": "<brief description of what you see>",
       "timer": "<if hibernation or dormant_period, the countdown timer text e.g. '00:35:31', otherwise omit>"
@@ -212,4 +216,28 @@ post_battle:
         "visible": <true/false>,
         "text": "<button text if readable>"
       }
+    }
+
+recovery_guidance:
+  system: "You analyze mobile game screenshots and suggest actions to return to gameplay."
+  prompt: |
+    This screenshot is from a device running "Capybara Go" (Alien Minefield mode).
+    The bot is stuck and has not made progress for a long time.
+
+    Analyze the screenshot and determine what to tap to get back to the game's
+    main map (3D world with monuments and capybara characters).
+
+    Look for: popup OK/Cancel/Close buttons, error Retry buttons, navigation buttons,
+    loading screens (suggest waiting), the game app icon (suggest launch_app).
+
+    Return JSON only:
+    {
+      "diagnosis": "<brief description of what you see>",
+      "suggested_action": "<tap/back/wait/launch_app/give_up>",
+      "tap_target": {
+        "x_percent": <0-100>,
+        "y_percent": <0-100>,
+        "description": "<what to tap>"
+      },
+      "confidence": <0.0-1.0>
     }

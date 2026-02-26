@@ -28,6 +28,7 @@ class BotState(Enum):
     RECONNECTING = auto()
     IDLE = auto()
     ERROR_RECOVERY = auto()
+    STAGNATION_RECOVERY = auto()
     PAUSED = auto()
     STOPPED = auto()
 
@@ -96,6 +97,9 @@ class BotContext:
     monument_tracker: dict[int, MonumentRecord] = field(default_factory=lambda: {
         i: MonumentRecord(slot=i) for i in range(1, 5)
     })
+    last_progress_time: float = field(default_factory=time.time)
+    stagnation_recovery_attempts: int = 0
+    last_stagnation_recovery_time: float = 0.0
 
     def log_action(self, message: str) -> None:
         entry = {"time": time.time(), "message": message}
@@ -160,7 +164,8 @@ class StateMachine:
         timeout = self.config.get("bot", {}).get("stuck_timeout", 60)
         elapsed = time.time() - self.context.state_enter_time
         if elapsed > timeout and self.state not in (
-            BotState.PAUSED, BotState.STOPPED, BotState.IDLE, BotState.RECONNECTING
+            BotState.PAUSED, BotState.STOPPED, BotState.IDLE, BotState.RECONNECTING,
+            BotState.STAGNATION_RECOVERY,
         ):
             logger.warning(
                 f"Stuck in {self.state.name} for {elapsed:.1f}s (timeout={timeout}s)"
@@ -189,6 +194,50 @@ class StateMachine:
 
         return False
 
+    def _check_stagnation(self) -> bool:
+        """Check if the bot has gone too long without meaningful progress.
+
+        Returns True if stagnation is detected and recovery should be attempted.
+        Auto-pauses the bot if max recovery attempts have been exhausted.
+        """
+        exempt = (
+            BotState.PAUSED, BotState.STOPPED, BotState.IDLE,
+            BotState.STAGNATION_RECOVERY, BotState.RECONNECTING,
+        )
+        if self.state in exempt:
+            return False
+
+        bot_cfg = self.config.get("bot", {})
+        timeout = bot_cfg.get("stagnation_timeout_seconds", 1800)
+        elapsed = time.time() - self.context.last_progress_time
+        if elapsed <= timeout:
+            return False
+
+        # Rate-limit recovery attempts
+        interval = bot_cfg.get("recovery_interval_seconds", 120)
+        since_last = time.time() - self.context.last_stagnation_recovery_time
+        if self.context.last_stagnation_recovery_time > 0 and since_last < interval:
+            return False
+
+        # Check if we've exhausted recovery attempts
+        max_attempts = bot_cfg.get("max_recovery_attempts", 5)
+        if self.context.stagnation_recovery_attempts >= max_attempts:
+            logger.warning(
+                f"Stagnation: {max_attempts} recovery attempts exhausted — auto-pausing bot"
+            )
+            self.context.log_action(
+                f"Auto-pausing: no progress for {elapsed:.0f}s and "
+                f"{max_attempts} recovery attempts failed"
+            )
+            self.pause()
+            return False
+
+        logger.warning(
+            f"Stagnation detected: no progress for {elapsed:.0f}s "
+            f"(attempt {self.context.stagnation_recovery_attempts + 1}/{max_attempts})"
+        )
+        return True
+
     async def run(self) -> None:
         """Main bot loop."""
         self._running = True
@@ -212,6 +261,12 @@ class StateMachine:
                 self.context.stats.consecutive_errors += 1
                 self.context.error_message = f"Stuck in {self.state.name}"
                 self.state = BotState.ERROR_RECOVERY
+                self.context.state_enter_time = time.time()
+
+            if self._check_stagnation():
+                self.context.stagnation_recovery_attempts += 1
+                self.context.last_stagnation_recovery_time = time.time()
+                self.state = BotState.STAGNATION_RECOVERY
                 self.context.state_enter_time = time.time()
 
             handler = self._handlers.get(self.state)
@@ -267,6 +322,8 @@ class StateMachine:
             "stats": self.context.stats.to_dict(),
             "current_target": self.context.current_target,
             "error_message": self.context.error_message,
+            "last_progress_time": self.context.last_progress_time,
+            "stagnation_recovery_attempts": self.context.stagnation_recovery_attempts,
             "action_log": self.context.action_log[-50:],
             "monuments": {
                 slot: {

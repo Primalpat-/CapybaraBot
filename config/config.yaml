@@ -86,7 +86,13 @@ bot:
   # Consecutive retries without progress before going idle to cool down
   max_idle_retries: 8
   # Clear all calibrated coordinates on bot startup (useful during testing)
-  clear_calibration_on_start: false
+  clear_calibration_on_start: true
+  # App crash recovery
+  app_package: "com.habby.capybara"  # find with: adb shell pm list packages | grep -i capy
+  # Stagnation detection
+  stagnation_timeout_seconds: 1800  # 30 min without monument progress
+  max_recovery_attempts: 5          # then auto-pause
+  recovery_interval_seconds: 120    # min gap between recovery attempts
 
 dashboard:
   host: "0.0.0.0"

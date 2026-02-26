@@ -21,6 +21,7 @@ SCREEN_ELEMENTS: dict[str, list[str]] = {
     "home_screen": ["star_trek_button"],
     "mode_select": ["alien_minefield_button"],
     "occupy_prompt": ["occupy_cancel_button"],
+    "android_home": ["app_icon"],
 }
 
 # Human-readable descriptions used in the Vision calibration prompt
@@ -95,6 +96,11 @@ ELEMENT_DESCRIPTIONS: dict[str, str] = {
         "The popup asks about occupying a monument. There are two buttons: "
         "'Cancel' (pink/red, on the left) and 'OK' (yellow/orange, on the right). "
         "Return the center of the 'Cancel' button text."
+    ),
+    "app_icon": (
+        "The 'Capybara Go' game app icon on the Android home screen. "
+        "Look for a colorful app icon featuring a capybara character. "
+        "Return the center of this app icon."
     ),
 }
 

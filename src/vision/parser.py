@@ -119,6 +119,16 @@ class PostBattleInfo:
     action_button: ActionButton
 
 
+@dataclass
+class RecoveryGuidance:
+    diagnosis: str
+    suggested_action: str  # tap, back, wait, launch_app, give_up
+    tap_x_percent: float
+    tap_y_percent: float
+    tap_description: str
+    confidence: float
+
+
 def _extract_json(text: str) -> dict:
     """Extract JSON from a response that might contain markdown fences or extra text."""
     # Try direct parse first
@@ -319,4 +329,17 @@ def parse_post_battle(text: str) -> PostBattleInfo:
         all_defenders_defeated=bool(data.get("all_defenders_defeated", False)),
         next_action_available=data.get("next_action_available", "unknown"),
         action_button=action_button,
+    )
+
+
+def parse_recovery_guidance(text: str) -> RecoveryGuidance:
+    data = _extract_json(text)
+    tap = data.get("tap_target", {})
+    return RecoveryGuidance(
+        diagnosis=data.get("diagnosis", ""),
+        suggested_action=data.get("suggested_action", "give_up"),
+        tap_x_percent=float(tap.get("x_percent", 50)),
+        tap_y_percent=float(tap.get("y_percent", 50)),
+        tap_description=tap.get("description", ""),
+        confidence=float(data.get("confidence", 0)),
     )
