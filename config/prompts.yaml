@@ -104,15 +104,17 @@ check_monument:
     - **Defenders**: Slots showing player names/avatars who are defending this monument.
       Each slot shows a player name. If the slot is empty, the name area says "Not Garrisoned".
     - **Monument Ownership** (at the bottom of the popup): This shows who currently owns
-      the monument. If the text is in BLUE and says "Star Spirit", the monument is friendly
-      (owned by the player's alliance). If the text is in RED with a different name, it is
-      enemy-owned. This is the authoritative way to determine ownership.
+      the monument. The monument is friendly ONLY if BOTH conditions are met:
+      1. The text is in BLUE color
+      2. The text reads exactly "Star Spirit" (NOT "Star Alliance" or any other name)
+      Any other name or red-colored text means the monument is enemy-owned.
     - **Action button**: A large button at the bottom — "Attack", "Claim", or similar.
+      This is the strongest signal: "Attack" always means enemy, "Visit" always means friendly.
 
     Return JSON only:
     {
       "ownership": "<player/enemy/neutral/unknown>",
-      "is_friendly": <true if Monument Ownership text is blue/Star Spirit, false if red/enemy, null if unclear>,
+      "is_friendly": <true ONLY if ownership text is BLUE and reads exactly "Star Spirit", false otherwise>,
       "monument_name": "<name if visible>",
       "ownership_text": "<the exact text shown in the Monument Ownership section, e.g. 'Star Spirit' or a player/alliance name>",
       "defenders": [

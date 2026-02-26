@@ -865,6 +865,14 @@ class StateHandlers:
         info = parse_monument_info(text)
         ctx.monument_info = info
 
+        # Cross-check: action button "Attack" means enemy, regardless of ownership text
+        if info.is_friendly and info.action_button.action_type == "attack":
+            ctx.log_action(
+                "Ownership says friendly but action button says Attack — "
+                "overriding to enemy"
+            )
+            info.is_friendly = False
+
         # Update monument tracker with popup result
         slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
         if slot in ctx.monument_tracker:
