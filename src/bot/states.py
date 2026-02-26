@@ -291,9 +291,10 @@ class StateHandlers:
         If the timer is broken (negative or unparseable), exits the game mode
         and re-enters via RECONNECTING to get a fresh timer reading.
         """
+        max_hibernation = 3 * 3600  # hibernation is never longer than 3 hours
         secs = parse_timer_seconds(screen.timer)
         self._hibernation_seconds = secs
-        if secs is not None and secs > 0:
+        if secs is not None and 0 < secs <= max_hibernation:
             m, s = divmod(secs, 60)
             h, m = divmod(m, 60)
             ctx.log_action(f"Hibernation active — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
@@ -301,9 +302,9 @@ class StateHandlers:
                 self._event_logger.log("hibernation_start", duration=secs)
             return BotState.IDLE
 
-        # Timer is broken (negative, zero, or unparseable) — exit and re-enter
+        # Timer is broken (negative, zero, unparseable, or impossibly long) — exit and re-enter
         ctx.log_action(
-            f"Hibernation timer broken ('{screen.timer}') — "
+            f"Hibernation timer broken ('{screen.timer}', parsed={secs}s) — "
             "exiting game mode to get fresh timer"
         )
         png = await self.capture.capture()
