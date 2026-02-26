@@ -1361,11 +1361,11 @@ class StateHandlers:
             png, current, ok = await self._tap_and_verify(
                 element_name="alien_minefield_button",
                 screen_type="mode_select",
-                expected_screens=["main_map", "loading"],
+                expected_screens=["main_map", "loading", "hibernation"],
                 ctx=ctx, config=config, png=png,
             )
-            # Even if not "ok", the game might still be loading — proceed
-            await self._wait(5.0, jitter, "game loading")
+            # Wait for the game mode to fully load before proceeding
+            png, current = await self._wait_past_loading(ctx, config, "alien minefield loading")
 
         ctx.log_action("Reconnection complete — reinitializing")
         return BotState.INITIALIZING
