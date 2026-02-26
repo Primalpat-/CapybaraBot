@@ -182,9 +182,13 @@ def parse_screen_identification(text: str) -> ScreenIdentification:
 def parse_timer_seconds(timer_str: str) -> int | None:
     """Parse a 'HH:MM:SS' or 'MM:SS' countdown string into total seconds.
 
-    Returns None if the string can't be parsed.
+    Returns None if the string can't be parsed or contains negative values
+    (the game displays negative timers as a glitch when the timer has expired).
     """
     if not timer_str:
+        return None
+    # Negative timers are a game display bug — treat as expired/broken
+    if "-" in timer_str:
         return None
     match = re.match(r"(\d{1,2}):(\d{2}):(\d{2})", timer_str)
     if match:

@@ -252,6 +252,12 @@ class TestParseTimerSeconds:
     def test_garbage(self):
         assert parse_timer_seconds("no timer here") is None
 
+    def test_negative_timer_returns_none(self):
+        assert parse_timer_seconds("-15:-07:-22") is None
+
+    def test_negative_mmss_returns_none(self):
+        assert parse_timer_seconds("-05:-30") is None
+
     def test_screen_identification_timer(self):
         text = '{"screen_type": "hibernation", "confidence": 0.95, "details": "Sleeping capybara", "timer": "00:35:31"}'
         result = parse_screen_identification(text)
