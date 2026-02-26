@@ -129,6 +129,18 @@ class RecoveryGuidance:
     confidence: float
 
 
+@dataclass
+class DailyPopupCheck:
+    popup_visible: bool
+    do_not_show_found: bool
+    do_not_show_x: float
+    do_not_show_y: float
+    close_found: bool
+    close_x: float
+    close_y: float
+    details: str
+
+
 def _extract_json(text: str) -> dict:
     """Extract JSON from a response that might contain markdown fences or extra text."""
     # Try direct parse first
@@ -342,4 +354,20 @@ def parse_recovery_guidance(text: str) -> RecoveryGuidance:
         tap_y_percent=float(tap.get("y_percent", 50)),
         tap_description=tap.get("description", ""),
         confidence=float(data.get("confidence", 0)),
+    )
+
+
+def parse_daily_popup_check(text: str) -> DailyPopupCheck:
+    data = _extract_json(text)
+    dns = data.get("do_not_show_text", {})
+    close = data.get("close_button", {})
+    return DailyPopupCheck(
+        popup_visible=bool(data.get("popup_visible", False)),
+        do_not_show_found=bool(dns.get("found", False)),
+        do_not_show_x=float(dns.get("x_percent", 50)),
+        do_not_show_y=float(dns.get("y_percent", 50)),
+        close_found=bool(close.get("found", False)),
+        close_x=float(close.get("x_percent", 50)),
+        close_y=float(close.get("y_percent", 50)),
+        details=data.get("details", ""),
     )

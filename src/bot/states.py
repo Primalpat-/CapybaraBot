@@ -30,6 +30,7 @@ from src.vision.parser import (
     parse_post_battle,
     parse_calibration_result,
     parse_recovery_guidance,
+    parse_daily_popup_check,
     parse_timer_seconds,
 )
 from src.vision.prompts import get_prompt
@@ -123,6 +124,49 @@ class StateHandlers:
         ctx.log_action(f"Occupy prompt — tapping Cancel at ({x}, {y})")
         await self.input.tap(x, y)
         await self._wait(timing.get("screen_transition", 2.0), jitter, "occupy cancel")
+
+    async def _dismiss_daily_popups(self, ctx: BotContext, config: dict,
+                                       max_popups: int = 3) -> int:
+        """Dismiss up to max_popups daily promotional popups.
+
+        Each popup has a 'Do not show again today' radio/checkbox and an X close
+        button. Taps the radio text first, then the X, and loops until no popup
+        is visible or max_popups is reached.
+
+        Returns the number of popups dismissed.
+        """
+        dismissed = 0
+        for i in range(max_popups):
+            png = await self.capture.capture()
+            ctx.last_screenshot = png
+            text = self._call_vision(png, "check_daily_popup")
+            ctx.stats.api_calls += 1
+            result = parse_daily_popup_check(text)
+
+            if not result.popup_visible:
+                break
+
+            ctx.log_action(f"Daily popup #{i + 1} detected: {result.details}")
+
+            if result.do_not_show_found:
+                x = int(result.do_not_show_x / 100 * self._screen_w)
+                y = int(result.do_not_show_y / 100 * self._screen_h)
+                ctx.log_action(f"Tapping 'Do not show again' at ({x}, {y})")
+                await self.input.tap(x, y)
+                await self._wait(0.8, 0.1, "do not show tap")
+
+            if result.close_found:
+                x = int(result.close_x / 100 * self._screen_w)
+                y = int(result.close_y / 100 * self._screen_h)
+                ctx.log_action(f"Tapping popup close button at ({x}, {y})")
+                await self.input.tap(x, y)
+                await self._wait(1.5, 0.2, "popup close tap")
+
+            dismissed += 1
+
+        if dismissed > 0:
+            ctx.log_action(f"Dismissed {dismissed} daily popup(s)")
+        return dismissed
 
     async def _launch_app(self, ctx: BotContext, config: dict) -> bool:
         """Launch the game app via ADB monkey command.
@@ -1204,6 +1248,11 @@ class StateHandlers:
                 ctx.error_message = "Reconnect failed: game not reached after app launch"
                 return BotState.ERROR_RECOVERY
 
+            # Dismiss any daily popups that appeared after launch
+            await self._dismiss_daily_popups(ctx, config)
+            # Re-identify screen after popup dismissal
+            png, current = await self._wait_past_loading(ctx, config, "post-popup check")
+
         # ── Step 1: If logged_out, wait then tap Restart ─────────────
         if current.screen_type == "logged_out":
             bot_cfg = config.get("bot", {})
@@ -1249,6 +1298,11 @@ class StateHandlers:
                 ctx.log_action("Could not reach home screen — going to error recovery")
                 ctx.error_message = "Reconnect failed: home screen not reached"
                 return BotState.ERROR_RECOVERY
+
+            # Dismiss any daily popups that appeared after restart
+            await self._dismiss_daily_popups(ctx, config)
+            # Re-identify screen after popup dismissal
+            png, current = await self._wait_past_loading(ctx, config, "post-popup check")
 
         # ── Step 2: If home_screen, tap Star Trek with verification ──
         if current.screen_type in ("home_screen", "main_map", "unknown"):

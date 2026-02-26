@@ -5,7 +5,12 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.bot.state_machine import BotState, BotContext, StateMachine
-from src.vision.parser import parse_recovery_guidance, RecoveryGuidance
+from src.vision.parser import (
+    parse_recovery_guidance,
+    RecoveryGuidance,
+    parse_daily_popup_check,
+    DailyPopupCheck,
+)
 
 
 class TestCheckStagnation:
@@ -196,3 +201,53 @@ class TestStagnationRecoveryIntegration:
         status = sm.get_status()
         assert status["last_progress_time"] == 12345.0
         assert status["stagnation_recovery_attempts"] == 3
+
+
+class TestParseDailyPopupCheck:
+    def test_popup_visible(self):
+        text = '''
+        {
+            "popup_visible": true,
+            "do_not_show_text": {
+                "found": true,
+                "x_percent": 45.0,
+                "y_percent": 78.0
+            },
+            "close_button": {
+                "found": true,
+                "x_percent": 92.0,
+                "y_percent": 12.0
+            },
+            "details": "Daily promotional popup with gift offer"
+        }
+        '''
+        result = parse_daily_popup_check(text)
+        assert isinstance(result, DailyPopupCheck)
+        assert result.popup_visible is True
+        assert result.do_not_show_found is True
+        assert result.do_not_show_x == 45.0
+        assert result.do_not_show_y == 78.0
+        assert result.close_found is True
+        assert result.close_x == 92.0
+        assert result.close_y == 12.0
+        assert result.details == "Daily promotional popup with gift offer"
+
+    def test_popup_not_visible(self):
+        text = '{"popup_visible": false, "details": "Home screen with no popups"}'
+        result = parse_daily_popup_check(text)
+        assert result.popup_visible is False
+        assert result.do_not_show_found is False
+        assert result.close_found is False
+        assert result.details == "Home screen with no popups"
+
+    def test_defaults_on_empty_json(self):
+        text = '{}'
+        result = parse_daily_popup_check(text)
+        assert result.popup_visible is False
+        assert result.do_not_show_found is False
+        assert result.do_not_show_x == 50
+        assert result.do_not_show_y == 50
+        assert result.close_found is False
+        assert result.close_x == 50
+        assert result.close_y == 50
+        assert result.details == ""

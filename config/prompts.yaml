@@ -241,3 +241,28 @@ recovery_guidance:
       },
       "confidence": <0.0-1.0>
     }
+
+check_daily_popup:
+  system: "You analyze mobile game screenshots to detect promotional popups."
+  prompt: |
+    Look at this screenshot from the mobile game "Capybara Go".
+
+    Check if there is a promotional/daily popup overlay visible. These popups:
+    - Have text that says "Do not show again today" (or similar checkbox/radio text)
+    - Have an "X" close button, usually in the top-right corner of the popup
+
+    Return JSON only:
+    {
+      "popup_visible": <true/false>,
+      "do_not_show_text": {
+        "found": <true/false>,
+        "x_percent": <0-100>,
+        "y_percent": <0-100>
+      },
+      "close_button": {
+        "found": <true/false>,
+        "x_percent": <0-100>,
+        "y_percent": <0-100>
+      },
+      "details": "<brief description of what you see>"
+    }
