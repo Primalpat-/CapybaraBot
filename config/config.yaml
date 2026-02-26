@@ -3,7 +3,7 @@ adb:
   # Example: "C:/platform-tools/adb.exe"
   adb_path: "C:/platform-tools/adb.exe"
   host: "127.0.0.1"
-  port: 5555
+  port: 5556
   # BlueStacks default ADB port; adjust if needed
   connect_timeout: 10
   command_timeout: 30
@@ -86,7 +86,7 @@ bot:
   # Consecutive retries without progress before going idle to cool down
   max_idle_retries: 8
   # Clear all calibrated coordinates on bot startup (useful during testing)
-  clear_calibration_on_start: true
+  clear_calibration_on_start: false
 
 dashboard:
   host: "0.0.0.0"
