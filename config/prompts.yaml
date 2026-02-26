@@ -44,10 +44,15 @@ identify_screen:
       in a grid, a dock bar at the bottom, and a wallpaper background. There is NO game
       content — no capybara characters, no monuments, no game UI. The game app has
       crashed or been closed.
+    - "daily_popup": A promotional or event popup overlay is visible. The key indicator
+      is text reading "Do not show again today" (or similar checkbox/radio text) somewhere
+      on the popup. The popup may also have an "X" close button, usually in the top-right
+      corner. The popup content varies (gift offers, event announcements, etc.) but the
+      "Do not show again today" text is always present.
 
     Return JSON only:
     {
-      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, dormant_period, logged_out, home_screen, mode_select, occupy_prompt, android_home, loading, menu, unknown>",
+      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, dormant_period, logged_out, home_screen, mode_select, occupy_prompt, android_home, daily_popup, loading, menu, unknown>",
       "confidence": <0.0-1.0>,
       "details": "<brief description of what you see>",
       "timer": "<if hibernation or dormant_period, the countdown timer text e.g. '00:35:31', otherwise omit>"

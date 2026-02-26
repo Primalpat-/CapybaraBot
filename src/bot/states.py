@@ -521,6 +521,7 @@ class StateHandlers:
           home_screen      → RECONNECTING       Star Trek → Alien Minefield
           mode_select      → RECONNECTING       Alien Minefield
           android_home     → RECONNECTING       Launch app via ADB → navigate to game
+          daily_popup      → dismiss popups → INITIALIZING  Tap "do not show" + X, re-identify
           occupy_prompt    → tap Cancel → INITIALIZING  Never swap, re-identify screen
           loading/menu/unknown → OPENING_MINIMAP  Fallback — retry from minimap
 
@@ -545,6 +546,10 @@ class StateHandlers:
             return self._enter_hibernation(screen, ctx)
         elif screen.screen_type == "dormant_period":
             return self._enter_dormant(screen, ctx)
+        elif screen.screen_type == "daily_popup":
+            ctx.log_action("Daily popup detected — dismissing")
+            await self._dismiss_daily_popups(ctx, config)
+            return BotState.INITIALIZING
         elif screen.screen_type in ("logged_out", "home_screen", "mode_select", "android_home"):
             ctx.log_action(f"Not in game ({screen.screen_type}) — entering reconnection flow")
             return BotState.RECONNECTING
@@ -1238,6 +1243,9 @@ class StateHandlers:
 
                 if current.screen_type in ("home_screen", "mode_select", "main_map"):
                     break
+                elif current.screen_type == "daily_popup":
+                    ctx.log_action("Daily popup detected — will dismiss")
+                    break
                 elif current.screen_type == "android_home":
                     ctx.log_action("Still on Android home — launch may have failed")
                     ctx.error_message = "App did not launch from Android home"
@@ -1284,6 +1292,9 @@ class StateHandlers:
                 ctx.log_action(f"Reconnect: screen={current.screen_type} (attempt {attempt + 1})")
 
                 if current.screen_type in ("home_screen", "mode_select"):
+                    break
+                elif current.screen_type == "daily_popup":
+                    ctx.log_action("Daily popup detected — will dismiss")
                     break
                 elif current.screen_type == "logged_out":
                     ctx.log_action("Still showing logged out popup — retapping Restart")
