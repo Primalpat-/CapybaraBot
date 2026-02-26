@@ -291,7 +291,7 @@ class StateHandlers:
         If the timer is broken (negative or unparseable), exits the game mode
         and re-enters via RECONNECTING to get a fresh timer reading.
         """
-        max_hibernation = 3 * 3600  # hibernation is never longer than 3 hours
+        max_hibernation = 4 * 3600 + 5 * 60  # hibernation is never longer than ~4 hours
         secs = parse_timer_seconds(screen.timer)
         self._hibernation_seconds = secs
         if secs is not None and 0 < secs <= max_hibernation:
