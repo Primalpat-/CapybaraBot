@@ -72,6 +72,8 @@ class StateHandlers:
         self._unbeatable_players: set[str] = set()  # players we've lost to
         self._attacking_defender: str | None = None  # defender we're currently fighting
         self._battle_result_png: bytes | None = None  # screenshot of battle result for defeat logging
+        self._event_logger = None   # persistence.EventLogger, injected from main.py
+        self._periodic_saver = None  # persistence.PeriodicSaver, injected from main.py
 
     def _is_paused(self) -> bool:
         """Check if the bot has been paused (used as interrupt_check for waits)."""
@@ -214,6 +216,8 @@ class StateHandlers:
             ctx.log_action(f"Hibernation active — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
         else:
             ctx.log_action("Hibernation active — could not read timer, will recheck in 60s")
+        if self._event_logger:
+            self._event_logger.log("hibernation_start", duration=secs)
         return BotState.IDLE
 
     def _enter_dormant(self, screen, ctx: BotContext) -> BotState:
@@ -226,6 +230,8 @@ class StateHandlers:
             ctx.log_action(f"Dormant period — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
         else:
             ctx.log_action("Dormant period — could not read timer, will recheck in 60s")
+        if self._event_logger:
+            self._event_logger.log("dormant_start", duration=secs)
         return BotState.IDLE
 
     def _save_calibration_diagnostic(self, png_bytes: bytes, elements: list, screen_type: str) -> None:
@@ -545,6 +551,40 @@ class StateHandlers:
         ctx.log_action("Minimap not detected after tap, retrying...")
         return BotState.OPENING_MINIMAP
 
+    def _score_monument_slot(self, slot: int, tracker, config: dict) -> tuple[int, float]:
+        """Score a monument slot for rotation priority.
+
+        Returns (tier, tiebreaker) — sorted ascending, lower = higher priority.
+        Tier 0: recently captured (post-capture watch)
+        Tier 1: contested (flips often)
+        Tier 2: default
+        Tier 3: well-defended (skip until stale)
+        """
+        rec = tracker[slot]
+        now = time.time()
+        persist_cfg = config.get("persistence", {})
+        watch_secs = persist_cfg.get("post_capture_watch_seconds", 300)
+        recheck_secs = persist_cfg.get("recheck_interval_seconds", 900)
+        threshold = persist_cfg.get("well_defended_threshold", 0)
+
+        # Tier 0: recently captured — watch for counter-attack
+        if rec.captured_at and (now - rec.captured_at) < watch_secs:
+            return (0, rec.captured_at)
+
+        # Tier 1: contested — flips often, likely to succeed
+        if rec.flipped_to_enemy >= 2:
+            return (1, -rec.flipped_to_enemy)
+
+        # Tier 3: well-defended — skip until recheck interval
+        if (rec.consecutive_enemy_checks >= 3
+                and rec.flipped_to_enemy <= threshold
+                and rec.last_checked > 0
+                and (now - rec.last_checked) < recheck_secs):
+            return (3, rec.last_checked)
+
+        # Tier 2: default
+        return (2, rec.last_checked)
+
     async def handle_reading_minimap(self, ctx: BotContext, config: dict) -> BotState:
         """Read minimap using pixel color detection (no Vision API needed)."""
         ctx.log_action("Reading minimap")
@@ -576,15 +616,23 @@ class StateHandlers:
             )
         self.calibrator.save()
 
-        # Pick next unvisited slot, prioritized by flip frequency (most contested first)
+        # Pick next slot using smart rotation scoring
         target_slot = None
         tracker = ctx.monument_tracker
-        unvisited = [s for s in range(1, NUM_MONUMENT_SLOTS + 1) if s not in self._visited_slots]
+        persist_cfg = config.get("persistence", {})
+        watch_secs = persist_cfg.get("post_capture_watch_seconds", 300)
 
-        if unvisited:
-            # Sort: highest flipped_to_enemy first, then least recently checked
-            unvisited.sort(key=lambda s: (-tracker[s].flipped_to_enemy, tracker[s].last_checked))
-            target_slot = unvisited[0]
+        # Build candidates: unvisited slots + recently-captured slots (post-capture watch)
+        candidates = []
+        for s in range(1, NUM_MONUMENT_SLOTS + 1):
+            in_watch = (tracker[s].captured_at
+                        and (time.time() - tracker[s].captured_at) < watch_secs)
+            if s not in self._visited_slots or in_watch:
+                candidates.append(s)
+
+        if candidates:
+            candidates.sort(key=lambda s: self._score_monument_slot(s, tracker, config))
+            target_slot = candidates[0]
 
         if target_slot is None:
             ctx.log_action("All monuments checked this cycle — going idle")
@@ -713,9 +761,28 @@ class StateHandlers:
             rec.check_count += 1
             rec.last_status = new_status
             rec.owner_name = info.ownership_text or info.ownership or ""
-            # Track flips TO enemy (was friendly/unknown, now enemy)
-            if new_status == "enemy" and old_status != "enemy":
-                rec.flipped_to_enemy += 1
+
+            # Track consecutive enemy checks
+            if new_status == "enemy":
+                rec.consecutive_enemy_checks += 1
+            else:
+                rec.consecutive_enemy_checks = 0
+
+            # Track flips
+            if old_status and old_status != "unknown" and new_status != old_status:
+                rec.last_flip_time = time.time()
+                rec.last_flip_from = old_status
+                rec.last_flip_to = new_status
+                if new_status == "enemy":
+                    rec.flipped_to_enemy += 1
+                elif new_status == "friendly":
+                    rec.flipped_to_friendly += 1
+                if self._event_logger:
+                    self._event_logger.log(
+                        "monument_flip", slot=slot,
+                        from_status=old_status, to_status=new_status,
+                        owner=rec.owner_name,
+                    )
 
         ctx.log_action(
             f"Monument: {info.monument_name or 'unnamed'}, "
@@ -892,6 +959,13 @@ class StateHandlers:
             if any(e.name == "occupy_cancel_button" for e in occupy_els):
                 await self._dismiss_occupy_prompt(png, ctx, config)
                 ctx.stats.monuments_captured += 1
+                slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+                if slot in ctx.monument_tracker:
+                    rec = ctx.monument_tracker[slot]
+                    rec.captured_at = time.time()
+                    rec.times_captured += 1
+                if self._event_logger:
+                    self._event_logger.log("monument_captured", slot=slot)
                 ctx.log_action("Monument captured! (dismissed occupy swap prompt)")
                 self._attacking_defender = None
                 self._battle_result_png = None
@@ -937,6 +1011,12 @@ class StateHandlers:
             )
             if still_active:
                 ctx.stats.defeats += 1
+                slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+                if self._event_logger:
+                    self._event_logger.log(
+                        "battle_lost", slot=slot,
+                        defender=self._attacking_defender,
+                    )
                 # Save defeat screenshot if we have it
                 if self._battle_result_png:
                     defeat_dir = Path(__file__).resolve().parents[2] / "screenshots" / "defeats"
@@ -956,6 +1036,12 @@ class StateHandlers:
             else:
                 # Defender was defeated — it's a victory
                 ctx.stats.battles_won += 1
+                slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+                if self._event_logger:
+                    self._event_logger.log(
+                        "battle_won", slot=slot,
+                        defender=self._attacking_defender,
+                    )
 
         self._attacking_defender = None
         self._battle_result_png = None
@@ -963,6 +1049,13 @@ class StateHandlers:
         # Check if the monument is now ours (blue "Star Spirit" ownership)
         if info.is_friendly:
             ctx.stats.monuments_captured += 1
+            slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+            if slot in ctx.monument_tracker:
+                rec = ctx.monument_tracker[slot]
+                rec.captured_at = time.time()
+                rec.times_captured += 1
+            if self._event_logger:
+                self._event_logger.log("monument_captured", slot=slot)
             ctx.log_action("Monument captured! (ownership is friendly)")
             await self.actions.close_popup()
             return BotState.OPENING_MINIMAP

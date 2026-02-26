@@ -15,6 +15,14 @@ from src.adb.connection import ADBConnection
 from src.adb.input import ADBInput
 from src.bot.actions import BotActions
 from src.bot.calibration import CoordinateCalibrator
+from src.bot.persistence import (
+    EventLogger,
+    PeriodicSaver,
+    load_cumulative_stats,
+    load_monument_tracker,
+    save_cumulative_stats,
+    save_monument_tracker,
+)
 from src.bot.state_machine import BotState, StateMachine
 from src.bot.states import StateHandlers
 from src.vision.element_detector import ElementDetector
@@ -159,6 +167,23 @@ async def main() -> None:
 
     register_all_handlers(state_machine, handlers)
 
+    # Load persisted data
+    state_machine.context.monument_tracker = load_monument_tracker()
+    cumulative = load_cumulative_stats()
+    event_logger = EventLogger()
+    event_logger.log("session_start")
+    persist_cfg = config.get("persistence", {})
+    periodic_saver = PeriodicSaver(
+        interval_seconds=persist_cfg.get("save_interval_seconds", 60)
+    )
+    handlers._event_logger = event_logger
+    handlers._periodic_saver = periodic_saver
+
+    # Wire tick callback for periodic saves
+    state_machine._on_tick = lambda ctx: periodic_saver.maybe_save(
+        lambda: save_monument_tracker(ctx.monument_tracker)
+    )
+
     # Wire dashboard to bot state
     set_state_machine(state_machine)
 
@@ -239,6 +264,15 @@ async def main() -> None:
         await asyncio.gather(bot_task, dashboard_task, return_exceptions=True)
     except KeyboardInterrupt:
         handle_shutdown()
+
+    # Persist data on shutdown
+    save_monument_tracker(state_machine.context.monument_tracker)
+    save_cumulative_stats(state_machine.context.stats, cumulative)
+    event_logger.log(
+        "session_end",
+        runtime=state_machine.context.stats.runtime_seconds,
+        stats=state_machine.context.stats.to_dict(),
+    )
 
     # Print final stats
     usage = vision.get_usage_summary()

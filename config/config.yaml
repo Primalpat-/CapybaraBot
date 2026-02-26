@@ -94,6 +94,12 @@ dashboard:
   # How many log entries to keep in memory
   max_log_entries: 500
 
+persistence:
+  save_interval_seconds: 60
+  recheck_interval_seconds: 900     # 15 min — well-defended recheck
+  post_capture_watch_seconds: 300   # 5 min — monitor after capture
+  well_defended_threshold: 0        # max flipped_to_enemy to be "well-defended"
+
 input:
   # Tap jitter in pixels
   tap_jitter: 5

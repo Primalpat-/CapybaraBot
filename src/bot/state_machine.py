@@ -37,6 +37,7 @@ class BotStats:
     monuments_visited: int = 0
     battles_fought: int = 0
     battles_won: int = 0
+    defeats: int = 0
     monuments_captured: int = 0
     api_calls: int = 0
     total_cost: float = 0.0
@@ -53,6 +54,7 @@ class BotStats:
             "monuments_visited": self.monuments_visited,
             "battles_fought": self.battles_fought,
             "battles_won": self.battles_won,
+            "defeats": self.defeats,
             "monuments_captured": self.monuments_captured,
             "api_calls": self.api_calls,
             "total_cost": round(self.total_cost, 4),
@@ -71,6 +73,13 @@ class MonumentRecord:
     owner_name: str = ""               # defender/owner name from popup
     check_count: int = 0               # total times popup was opened
     flipped_to_enemy: int = 0          # times status changed TO enemy
+    flipped_to_friendly: int = 0       # times flipped TO friendly
+    last_flip_time: float = 0.0        # timestamp of most recent flip
+    last_flip_from: str = ""           # status before flip
+    last_flip_to: str = ""             # status after flip
+    captured_at: float = 0.0           # when we last captured this slot
+    times_captured: int = 0            # total captures by us
+    consecutive_enemy_checks: int = 0  # consecutive checks where status=enemy
 
 
 @dataclass
@@ -108,6 +117,7 @@ class StateMachine:
         self._running = False
         self._paused = False
         self._tick_interval = 0.5  # seconds between ticks
+        self._on_tick: object | None = None  # callback(context) called each tick
 
     def register_handler(self, state: BotState, handler) -> None:
         """Register a handler function for a state.
@@ -237,6 +247,12 @@ class StateMachine:
                 self.state = BotState.ERROR_RECOVERY
                 self.context.state_enter_time = time.time()
 
+            if self._on_tick:
+                try:
+                    self._on_tick(self.context)
+                except Exception:
+                    logger.debug("on_tick callback error", exc_info=True)
+
             await asyncio.sleep(self._tick_interval)
 
         self.context.log_action("Bot loop ended")
@@ -260,6 +276,11 @@ class StateMachine:
                     "owner_name": rec.owner_name,
                     "check_count": rec.check_count,
                     "flipped_to_enemy": rec.flipped_to_enemy,
+                    "flipped_to_friendly": rec.flipped_to_friendly,
+                    "last_flip_time": rec.last_flip_time,
+                    "captured_at": rec.captured_at,
+                    "times_captured": rec.times_captured,
+                    "consecutive_enemy_checks": rec.consecutive_enemy_checks,
                 }
                 for slot, rec in self.context.monument_tracker.items()
             },
