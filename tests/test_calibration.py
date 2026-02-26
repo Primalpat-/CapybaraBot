@@ -82,10 +82,11 @@ class TestGetPixel:
 class TestNeedsCalibration:
     def test_all_needed_initially(self, calibrator):
         needed = calibrator.needs_calibration("main_map")
-        assert needed == ["minimap_button"]
+        assert needed == ["minimap_button", "exit_mode_button"]
 
     def test_none_needed_after_calibration(self, calibrator):
         calibrator.store("minimap_button", 90.0, 10.0, 0.95)
+        calibrator.store("exit_mode_button", 8.0, 92.0, 0.9)
         assert calibrator.needs_calibration("main_map") == []
 
     def test_partial_calibration(self, calibrator):

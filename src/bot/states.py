@@ -285,19 +285,42 @@ class StateHandlers:
         ctx.log_action(f"All tap offsets failed for {element_name}")
         return check_png, screen, False
 
-    def _enter_hibernation(self, screen, ctx: BotContext) -> BotState:
-        """Handle hibernation detection — parse timer and go idle."""
+    async def _enter_hibernation(self, screen, ctx: BotContext, config: dict) -> BotState:
+        """Handle hibernation detection — parse timer and go idle.
+
+        If the timer is broken (negative or unparseable), exits the game mode
+        and re-enters via RECONNECTING to get a fresh timer reading.
+        """
         secs = parse_timer_seconds(screen.timer)
         self._hibernation_seconds = secs
-        if secs is not None:
+        if secs is not None and secs > 0:
             m, s = divmod(secs, 60)
             h, m = divmod(m, 60)
             ctx.log_action(f"Hibernation active — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
+            if self._event_logger:
+                self._event_logger.log("hibernation_start", duration=secs)
+            return BotState.IDLE
+
+        # Timer is broken (negative, zero, or unparseable) — exit and re-enter
+        ctx.log_action(
+            f"Hibernation timer broken ('{screen.timer}') — "
+            "exiting game mode to get fresh timer"
+        )
+        png = await self.capture.capture()
+        ctx.last_screenshot = png
+        self._calibrate_for_screen(png, "main_map", ctx)
+        x, y = self.calibrator.get_pixel("exit_mode_button")
+        if x > 0 and y > 0:
+            ctx.log_action(f"Tapping exit mode button at ({x}, {y})")
+            await self.input.tap(x, y)
+            timing = config.get("timing", {})
+            jitter = timing.get("jitter_factor", 0.3)
+            await self._wait(3.0, jitter, "exit mode transition")
         else:
-            ctx.log_action("Hibernation active — could not read timer, will recheck in 60s")
-        if self._event_logger:
-            self._event_logger.log("hibernation_start", duration=secs)
-        return BotState.IDLE
+            ctx.log_action("Could not find exit mode button — using Android back")
+            await self.input.back()
+            await self._wait(2.0, 0.3, "back button transition")
+        return BotState.RECONNECTING
 
     def _enter_dormant(self, screen, ctx: BotContext) -> BotState:
         """Handle dormant period — parse timer and go idle."""
@@ -543,7 +566,7 @@ class StateHandlers:
             self._calibrate_for_screen(png, "main_map", ctx)
 
         if screen.screen_type == "hibernation":
-            return self._enter_hibernation(screen, ctx)
+            return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
             return self._enter_dormant(screen, ctx)
         elif screen.screen_type == "daily_popup":
@@ -714,6 +737,11 @@ class StateHandlers:
                         and (time.time() - tracker[s].captured_at) < watch_secs)
             if s not in self._visited_slots or in_watch:
                 candidates.append(s)
+
+        # Always prefer red (enemy) slots over blue (friendly) ones
+        red_candidates = [s for s in candidates if slot_colors.get(s) == "red"]
+        if red_candidates:
+            candidates = red_candidates
 
         if candidates:
             candidates.sort(key=lambda s: self._score_monument_slot(s, tracker, config))
@@ -1472,7 +1500,7 @@ class StateHandlers:
             await self._tap_ok_button(png, ctx, config)
             return BotState.POST_BATTLE
         elif screen.screen_type == "hibernation":
-            return self._enter_hibernation(screen, ctx)
+            return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
             return self._enter_dormant(screen, ctx)
         elif screen.screen_type == "occupy_prompt":

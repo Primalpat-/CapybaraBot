@@ -17,9 +17,13 @@ identify_screen:
       with defender info and an action button (Attack, Claim, etc.).
     - "battle_active": An active battle scene with animated combat.
     - "battle_result": A results screen showing victory or defeat after a battle.
-    - "hibernation": A large sleeping capybara is shown on screen with "Zzz" symbols and
-      text reading "Hibernation ends:" followed by a countdown timer (HH:MM:SS). This means
-      the player cannot perform any actions until hibernation ends.
+    - "hibernation": The main game map is visible, but there is a large sleeping capybara
+      icon/overlay at the TOP CENTER of the screen with "Zzz" symbols. Near this icon is
+      text reading "Hibernation ends:" followed by a countdown timer (HH:MM:SS). The minimap
+      widget in the top-right corner also shows a tiny sleeping capybara icon next to the
+      level/tier text. IMPORTANT: If you see ANY sleeping capybara icon or "Hibernation ends"
+      text, classify as "hibernation" NOT "main_map", even though the 3D map is visible
+      underneath. The player cannot perform any actions until hibernation ends.
     - "dormant_period": The main game map is visible, but a red/orange banner near
       the bottom reads "Cannot attack:" followed by a countdown timer (HH:MM:SS).
       The left sidebar shows a "Dormant Period" icon with "Zzz" symbols. The player

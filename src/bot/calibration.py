@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 # Maps screen types to the UI elements visible on that screen.
 # For "minimap", we calibrate two GRID REFERENCE points and derive all 4 slots.
 SCREEN_ELEMENTS: dict[str, list[str]] = {
-    "main_map": ["minimap_button"],
+    "main_map": ["minimap_button", "exit_mode_button"],
     "minimap": ["minimap_square_topleft", "minimap_square_bottomright", "minimap_close"],
     "arrived_at_monument": ["world_monument"],
     "monument_popup": ["action_button", "close_popup"],
@@ -101,6 +101,11 @@ ELEMENT_DESCRIPTIONS: dict[str, str] = {
         "The 'Capybara Go' game app icon on the Android home screen. "
         "Look for a colorful app icon featuring a capybara character. "
         "Return the center of this app icon."
+    ),
+    "exit_mode_button": (
+        "The large back arrow button in the BOTTOM-LEFT corner of the main map "
+        "screen. This is a prominent left-pointing arrow icon that exits the "
+        "current game mode. Return the center of this arrow button."
     ),
 }
 
