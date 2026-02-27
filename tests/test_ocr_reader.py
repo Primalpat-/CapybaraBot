@@ -40,6 +40,21 @@ class TestExtractPowerNumber:
     def test_leading_trailing_spaces(self):
         assert _extract_power_number("  3,456  ") == 3456
 
+    def test_millions_suffix(self):
+        assert _extract_power_number("24.68M") == 24680000
+
+    def test_millions_suffix_lowercase(self):
+        assert _extract_power_number("14.28m") == 14280000
+
+    def test_thousands_suffix(self):
+        assert _extract_power_number("39.29K") == 39290
+
+    def test_whole_millions(self):
+        assert _extract_power_number("3M") == 3000000
+
+    def test_suffix_with_surrounding_text(self):
+        assert _extract_power_number("Power 24.68M total") == 24680000
+
 
 class TestDetectTextColor:
     def _make_solid_color(self, bgr, size=(50, 100)):

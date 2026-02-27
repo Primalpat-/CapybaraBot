@@ -62,24 +62,25 @@ class OCRMonumentReading:
 # ---------------------------------------------------------------------------
 
 # The monument popup occupies roughly the center of the screen
-POPUP_REGION = (0.10, 0.18, 0.90, 0.88)  # (left%, top%, right%, bottom%)
+POPUP_REGION = (0.08, 0.06, 0.92, 0.95)  # (left%, top%, right%, bottom%)
 
 # Regions within the popup (relative to POPUP_REGION)
-# Ownership text at the bottom of the popup area
-OWNERSHIP_REGION = (0.15, 0.72, 0.85, 0.82)
+# "Monument Ownership: Star Spirit" line — sits between Defense Info and buttons
+OWNERSHIP_REGION = (0.02, 0.68, 0.70, 0.75)
 
-# Three defender slots — each has name + power
+# Three defender slots — name is right of character art, power just below name
+# Name region captures the player name text; power region captures the "XX.XXM" text
 DEFENDER_REGIONS = [
     # slot 1 (top)
-    {"name": (0.25, 0.22, 0.75, 0.30), "power": (0.25, 0.30, 0.75, 0.37)},
+    {"name": (0.44, 0.30, 0.78, 0.37), "power": (0.22, 0.36, 0.55, 0.42)},
     # slot 2 (middle)
-    {"name": (0.25, 0.38, 0.75, 0.46), "power": (0.25, 0.46, 0.75, 0.53)},
+    {"name": (0.44, 0.42, 0.78, 0.49), "power": (0.22, 0.48, 0.55, 0.54)},
     # slot 3 (bottom)
-    {"name": (0.25, 0.54, 0.75, 0.62), "power": (0.25, 0.62, 0.75, 0.69)},
+    {"name": (0.44, 0.54, 0.78, 0.61), "power": (0.22, 0.60, 0.55, 0.66)},
 ]
 
-# Action button at the very bottom of popup
-ACTION_BUTTON_REGION = (0.20, 0.84, 0.80, 0.94)
+# Action button — left button area (Attack on enemy, Exit on friendly)
+ACTION_BUTTON_REGION = (0.05, 0.84, 0.50, 0.96)
 
 
 # ---------------------------------------------------------------------------
@@ -156,16 +157,29 @@ def _detect_text_color(image: np.ndarray) -> str:
 def _extract_power_number(text: str) -> int:
     """Extract a numeric power value from OCR text.
 
-    Handles formats like: "12,345", "12345", "Power: 12,345", "12.3K"
-    Returns 0 if no number found.
+    Handles formats like: "24.68M", "14.28K", "12,345", "12345"
+    M = millions, K = thousands. Returns 0 if no number found.
     """
     if not text:
         return 0
 
-    # Remove common OCR artifacts and normalize
     cleaned = text.strip()
 
-    # Try to find numbers with commas (e.g., "12,345")
+    # Try number with M/K suffix first (e.g., "24.68M", "14.28K", "3M")
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*([MmKk])", cleaned)
+    if match:
+        num_str = match.group(1).replace(",", ".")
+        suffix = match.group(2).upper()
+        try:
+            value = float(num_str)
+            if suffix == "M":
+                return int(value * 1_000_000)
+            elif suffix == "K":
+                return int(value * 1_000)
+        except ValueError:
+            pass
+
+    # Try numbers with commas (e.g., "12,345")
     match = re.search(r"[\d,]+\d", cleaned)
     if match:
         num_str = match.group(0).replace(",", "")
