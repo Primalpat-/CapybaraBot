@@ -7,6 +7,7 @@ from src.vision.ocr_reader import (
     _crop_region,
     _detect_text_color,
     _extract_power_number,
+    _is_power_text,
     OCRMonumentReading,
     OCRDefenderReading,
 )
@@ -57,30 +58,57 @@ class TestExtractPowerNumber:
 
 
 class TestDetectTextColor:
+    """_detect_text_color(image, bbox) extracts color from bbox region."""
+
     def _make_solid_color(self, bgr, size=(50, 100)):
-        """Create a solid-color image."""
         h, w = size
         img = np.zeros((h, w, 3), dtype=np.uint8)
         img[:] = bgr
         return img
 
+    def _full_bbox(self, h, w):
+        """Bbox covering the entire image."""
+        return [[0, 0], [w, 0], [w, h], [0, h]]
+
     def test_blue_image(self):
-        # Pure blue in BGR
         img = self._make_solid_color((255, 100, 0))
-        assert _detect_text_color(img) == "blue"
+        bbox = self._full_bbox(50, 100)
+        assert _detect_text_color(img, bbox) == "blue"
 
     def test_red_image(self):
-        # Pure red in BGR
         img = self._make_solid_color((0, 0, 255))
-        assert _detect_text_color(img) == "red"
+        bbox = self._full_bbox(50, 100)
+        assert _detect_text_color(img, bbox) == "red"
 
     def test_unknown_gray(self):
         img = self._make_solid_color((128, 128, 128))
-        assert _detect_text_color(img) == "unknown"
+        bbox = self._full_bbox(50, 100)
+        assert _detect_text_color(img, bbox) == "unknown"
 
     def test_empty_image(self):
         img = np.array([], dtype=np.uint8).reshape(0, 0, 3)
-        assert _detect_text_color(img) == "unknown"
+        bbox = [[0, 0], [0, 0], [0, 0], [0, 0]]
+        assert _detect_text_color(img, bbox) == "unknown"
+
+
+class TestIsPowerText:
+    def test_millions(self):
+        assert _is_power_text("24.68M") is True
+
+    def test_thousands(self):
+        assert _is_power_text("14.28K") is True
+
+    def test_plain_number(self):
+        assert _is_power_text("12345") is True
+
+    def test_comma_number(self):
+        assert _is_power_text("12,345") is True
+
+    def test_name_not_power(self):
+        assert _is_power_text("Primalpat") is False
+
+    def test_mixed_text(self):
+        assert _is_power_text("Defense Info") is False
 
 
 class TestCropRegion:

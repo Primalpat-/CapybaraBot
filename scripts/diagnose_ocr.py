@@ -4,9 +4,9 @@ Run with:  python -m scripts.diagnose_ocr
 
 This will:
 1. Connect to ADB and capture a screenshot
-2. Draw crop regions for each popup section
-3. Run OCR on each region and print results
-4. Save annotated output to screenshots/ocr/ for visual tuning
+2. Run full-popup OCR and draw all detected text bounding boxes
+3. Print parsed results
+4. Save annotated output to screenshots/ocr/ for visual review
 """
 
 import asyncio
@@ -25,10 +25,9 @@ from src.adb.connection import ADBConnection
 from src.adb.capture import ScreenCapture
 from src.vision.ocr_reader import (
     POPUP_REGION,
-    OWNERSHIP_REGION,
-    DEFENDER_REGIONS,
-    ACTION_BUTTON_REGION,
     _crop_region,
+    _get_reader,
+    _is_power_text,
     read_monument_popup,
 )
 
@@ -44,54 +43,66 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def _abs_region(popup_region, sub_region, img_w, img_h):
-    """Convert a sub-region (relative to popup) to absolute pixel coords."""
-    pl = int(popup_region[0] * img_w)
-    pt = int(popup_region[1] * img_h)
-    pw = int((popup_region[2] - popup_region[0]) * img_w)
-    ph = int((popup_region[3] - popup_region[1]) * img_h)
-
-    x1 = pl + int(sub_region[0] * pw)
-    y1 = pt + int(sub_region[1] * ph)
-    x2 = pl + int(sub_region[2] * pw)
-    y2 = pt + int(sub_region[3] * ph)
-    return x1, y1, x2, y2
-
-
-def draw_regions(image: np.ndarray) -> np.ndarray:
-    """Draw all OCR crop regions on the image with labels."""
+def draw_ocr_results(image: np.ndarray) -> np.ndarray:
+    """Run raw OCR on popup and draw every detected bounding box with text."""
     annotated = image.copy()
     h, w = image.shape[:2]
 
-    # Draw popup region
+    # Draw popup region outline
     pl, pt = int(POPUP_REGION[0] * w), int(POPUP_REGION[1] * h)
     pr, pb = int(POPUP_REGION[2] * w), int(POPUP_REGION[3] * h)
     cv2.rectangle(annotated, (pl, pt), (pr, pb), (0, 255, 0), 2)
     cv2.putText(annotated, "POPUP", (pl + 5, pt + 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    # Draw ownership region
-    x1, y1, x2, y2 = _abs_region(POPUP_REGION, OWNERSHIP_REGION, w, h)
-    cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 0), 2)
-    cv2.putText(annotated, "OWNERSHIP", (x1 + 5, y1 + 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+    # Crop popup and run raw OCR
+    popup = _crop_region(image, POPUP_REGION)
+    reader = _get_reader()
+    results = reader.readtext(popup, detail=1)
 
-    # Draw defender regions
-    colors = [(0, 255, 255), (255, 255, 0), (255, 0, 255)]
-    for i, regions in enumerate(DEFENDER_REGIONS):
-        color = colors[i % len(colors)]
-        for label_key in ("name", "power"):
-            x1, y1, x2, y2 = _abs_region(POPUP_REGION, regions[label_key], w, h)
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(annotated, f"D{i+1}_{label_key}", (x1 + 5, y1 + 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+    print(f"\nRaw OCR detections ({len(results)} items):")
+    print("-" * 70)
 
-    # Draw action button region
-    x1, y1, x2, y2 = _abs_region(POPUP_REGION, ACTION_BUTTON_REGION, w, h)
-    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
-    cv2.putText(annotated, "BUTTON", (x1 + 5, y1 + 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    for bbox, text, conf in results:
+        text = text.strip()
+        if not text:
+            continue
 
+        # Convert popup-relative bbox to full image coords
+        pts = np.array(bbox, dtype=np.int32)
+        pts[:, 0] = pts[:, 0] + pl
+        pts[:, 1] = pts[:, 1] + pt
+
+        # Color code: green=power, blue=button keywords, yellow=other
+        lower = text.lower()
+        if _is_power_text(text):
+            color = (0, 255, 0)
+            label = "PWR"
+        elif any(w in lower for w in ("attack", "exit", "visit", "claim", "quick", "mining")):
+            color = (255, 100, 100)
+            label = "BTN"
+        elif "ownership" in lower or "star spirit" in lower:
+            color = (255, 0, 255)
+            label = "OWN"
+        else:
+            color = (0, 255, 255)
+            label = ""
+
+        cv2.polylines(annotated, [pts], True, color, 2)
+
+        # Label with text and confidence
+        x_min = pts[:, 0].min()
+        y_min = pts[:, 1].min() - 5
+        display = f"{label} '{text}' {conf:.2f}" if label else f"'{text}' {conf:.2f}"
+        cv2.putText(annotated, display, (x_min, max(y_min, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+
+        # Also print to console
+        cy_pct = (np.mean(pts[:, 1]) - pt) / (pb - pt) * 100
+        cx_pct = (np.mean(pts[:, 0]) - pl) / (pr - pl) * 100
+        print(f"  [{cy_pct:5.1f}%, {cx_pct:5.1f}%] conf={conf:.2f}  {label:3s}  '{text}'")
+
+    print("-" * 70)
     return annotated
 
 
@@ -124,31 +135,31 @@ async def main():
     raw_path.write_bytes(png_bytes)
     logger.info(f"Saved raw screenshot: {raw_path}")
 
-    # Decode and draw regions
+    # Decode and draw OCR results
     arr = np.frombuffer(png_bytes, dtype=np.uint8)
     image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    annotated = draw_regions(image)
+    annotated = draw_ocr_results(image)
 
     annotated_path = OUTPUT_DIR / "annotated_regions.png"
     cv2.imwrite(str(annotated_path), annotated)
     logger.info(f"Saved annotated image: {annotated_path}")
 
-    # Run OCR
-    logger.info("Running OCR...")
+    # Run parsed OCR
+    logger.info("Running parsed OCR...")
     reading = read_monument_popup(png_bytes)
 
     # Print results
     print("\n" + "=" * 60)
-    print("OCR RESULTS")
+    print("PARSED RESULTS")
     print("=" * 60)
     print(f"  Ownership text:  '{reading.ownership_text}'")
     print(f"  Is friendly:     {reading.is_friendly}")
     print(f"  Action button:   '{reading.action_button_text}'")
     print(f"  Overall conf:    {reading.overall_confidence:.2f}")
-    print(f"  Total power:     {reading.total_garrison_power}")
+    print(f"  Total power:     {reading.total_garrison_power:,}")
     print()
     for d in reading.defenders:
-        print(f"  Defender {d.slot}: name='{d.name}', power={d.power}, "
+        print(f"  Defender {d.slot}: name='{d.name}', power={d.power:,}, "
               f"status={d.status}, conf={d.confidence:.2f}")
     print("=" * 60)
 
