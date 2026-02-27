@@ -257,26 +257,29 @@ class TestScoreMonumentSlot:
         tier, _ = h._score_monument_slot(1, tracker, cfg)
         assert tier == 2
 
-    def test_tier3_well_defended(self):
+    def test_tier3_stable_friendly(self):
+        """Fully garrisoned friendly with no flips → tier 3 (check every 15m)."""
         h = self._make_handlers()
         cfg = self._make_config()
         tracker = {1: MonumentRecord(
             slot=1,
-            consecutive_enemy_checks=5,
+            last_status="friendly",
             flipped_to_enemy=0,
+            garrison_count=3,
             last_checked=time.time() - 60,  # checked recently
         )}
         tier, _ = h._score_monument_slot(1, tracker, cfg)
         assert tier == 3
 
     def test_tier3_becomes_tier2_when_stale(self):
-        """Well-defended slot that hasn't been checked in a long time should be tier 2."""
+        """Stable friendly slot that hasn't been checked in a long time should be tier 2."""
         h = self._make_handlers()
         cfg = self._make_config()
         tracker = {1: MonumentRecord(
             slot=1,
-            consecutive_enemy_checks=5,
+            last_status="friendly",
             flipped_to_enemy=0,
+            garrison_count=3,
             last_checked=time.time() - 1000,  # older than recheck_interval
         )}
         tier, _ = h._score_monument_slot(1, tracker, cfg)

@@ -689,9 +689,10 @@ class StateHandlers:
         if rec.last_status == "friendly" and rec.garrison_count >= 0 and rec.garrison_count <= 1:
             return (1, rec.last_checked)
 
-        # Tier 3: well-defended — skip until recheck interval
-        if (rec.consecutive_enemy_checks >= 3
-                and rec.flipped_to_enemy <= threshold
+        # Tier 3: stable friendly — fully garrisoned, no flips, check every 15m
+        if (rec.last_status == "friendly"
+                and rec.flipped_to_enemy == 0
+                and rec.garrison_count >= 3
                 and rec.last_checked > 0
                 and (now - rec.last_checked) < recheck_secs):
             return (3, rec.last_checked)
