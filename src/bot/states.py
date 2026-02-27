@@ -750,6 +750,13 @@ class StateHandlers:
         if red_candidates:
             candidates = red_candidates
 
+        # Exclude Tier 3 slots — they're stable and don't need checking yet
+        if candidates:
+            candidates = [
+                s for s in candidates
+                if self._score_monument_slot(s, tracker, config)[0] < 3
+            ]
+
         if candidates:
             candidates.sort(key=lambda s: self._score_monument_slot(s, tracker, config))
             target_slot = candidates[0]
