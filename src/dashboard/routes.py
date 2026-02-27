@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pathlib import Path
 
-from src.bot.persistence import EVENTS_FILE, load_cumulative_stats
+from src.bot.persistence import EVENTS_FILE, load_cumulative_stats, save_monument_tracker
 from src.dashboard.app import get_state_machine
 from src.utils.logging_config import dashboard_handler
 
@@ -116,6 +116,25 @@ async def get_events(
         return {"events": events}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/api/clear-flips")
+async def clear_flips():
+    """Clear flip history from all monument slots and save immediately."""
+    sm = get_state_machine()
+    if sm is None:
+        raise HTTPException(503, "Bot not initialized")
+    for rec in sm.context.monument_tracker.values():
+        rec.flip_history = []
+        rec.flip_velocity = 0.0
+        rec.flipped_to_enemy = 0
+        rec.flipped_to_friendly = 0
+        rec.last_flip_time = 0.0
+        rec.last_flip_from = ""
+        rec.last_flip_to = ""
+    save_monument_tracker(sm.context.monument_tracker)
+    logger.info("Flip history cleared via dashboard")
+    return {"status": "flips_cleared"}
 
 
 @router.get("/api/cumulative")
