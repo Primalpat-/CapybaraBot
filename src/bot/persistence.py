@@ -33,11 +33,10 @@ class CumulativeStats:
     total_runtime_seconds: float = 0.0
     monuments_visited: int = 0
     battles_fought: int = 0
-    battles_won: int = 0
     defeats: int = 0
     monuments_captured: int = 0
-    api_calls: int = 0
-    total_cost: float = 0.0
+    vision_calls: int = 0
+    ocr_reads: int = 0
     first_session: str = ""
     last_session: str = ""
 
@@ -60,11 +59,10 @@ def save_cumulative_stats(session_stats, existing: CumulativeStats) -> Cumulativ
     existing.total_runtime_seconds += session_stats.runtime_seconds
     existing.monuments_visited += session_stats.monuments_visited
     existing.battles_fought += session_stats.battles_fought
-    existing.battles_won += session_stats.battles_won
     existing.defeats += session_stats.defeats
     existing.monuments_captured += session_stats.monuments_captured
-    existing.api_calls += session_stats.api_calls
-    existing.total_cost += session_stats.total_cost
+    existing.vision_calls += session_stats.vision_calls
+    existing.ocr_reads += session_stats.ocr_reads
     if not existing.first_session:
         existing.first_session = now
     existing.last_session = now
@@ -102,6 +100,7 @@ def save_monument_tracker(tracker: dict[int, MonumentRecord]) -> None:
             "defender_powers": rec.defender_powers,
             "defender_names": rec.defender_names,
             "flip_velocity": rec.flip_velocity,
+            "flip_history": rec.flip_history,
         }
     _ensure_data_dir()
     _atomic_write(MONUMENT_FILE, json.dumps(data, indent=2))
@@ -136,6 +135,7 @@ def load_monument_tracker() -> dict[int, MonumentRecord]:
                 rec.defender_powers = vals.get("defender_powers", [])
                 rec.defender_names = vals.get("defender_names", [])
                 rec.flip_velocity = vals.get("flip_velocity", 0.0)
+                rec.flip_history = vals.get("flip_history", [])
         logger.info("Monument tracker loaded from disk")
     except Exception:
         logger.warning("Failed to load monument tracker, using defaults", exc_info=True)

@@ -144,7 +144,7 @@ class StateHandlers:
             png = await self.capture.capture()
             ctx.last_screenshot = png
             text = self._call_vision(png, "check_daily_popup")
-            ctx.stats.api_calls += 1
+            ctx.stats.vision_calls += 1
             result = parse_daily_popup_check(text)
 
             if not result.popup_visible:
@@ -270,7 +270,7 @@ class StateHandlers:
                 )
 
             text = self._call_vision(check_png, "identify_screen")
-            ctx.stats.api_calls += 1
+            ctx.stats.vision_calls += 1
             screen = parse_screen_identification(text)
 
             if screen.screen_type in expected_screens:
@@ -392,6 +392,11 @@ class StateHandlers:
 
         Returns a MonumentInfo if OCR confidence is above threshold, else None
         (caller should fall back to Vision API).
+
+        Falls back to Vision API when:
+        - OCR is disabled in config
+        - Overall confidence is below threshold
+        - Active defenders found but ALL have power=0 (likely misaligned crop regions)
         """
         from src.vision.parser import MonumentInfo, DefenderInfo, ActionButton
 
@@ -411,6 +416,16 @@ class StateHandlers:
             logger.info(
                 f"OCR confidence too low ({reading.overall_confidence:.2f} < {threshold}) "
                 "— falling back to Vision API"
+            )
+            return None
+
+        # Sanity check: if there are active defenders but ALL have power=0,
+        # the OCR crop regions are likely misaligned — fall back to Vision API
+        active_defenders = [d for d in reading.defenders if d.status == "active"]
+        if active_defenders and all(d.power == 0 for d in active_defenders):
+            logger.info(
+                f"OCR found {len(active_defenders)} active defenders but all have "
+                "power=0 — likely misaligned crop regions, falling back to Vision API"
             )
             return None
 
@@ -450,6 +465,7 @@ class StateHandlers:
             total_garrison_power=reading.total_garrison_power,
         )
 
+        ctx.stats.ocr_reads += 1
         ctx.log_action(
             f"OCR read: friendly={info.is_friendly}, "
             f"button='{btn_text}', power={reading.total_garrison_power}, "
@@ -506,6 +522,13 @@ class StateHandlers:
             else:
                 # First flip — estimate at 1/hour
                 rec.flip_velocity = 1.0
+
+            rec.flip_history.append({
+                "time": now,
+                "from": old_status,
+                "to": new_status,
+            })
+            rec.prune_flip_history()
 
             rec.last_flip_time = now
             rec.last_flip_from = old_status
@@ -632,7 +655,7 @@ class StateHandlers:
 
         logger.info(f"Calling Vision API: calibrate_elements ({screen_type})")
         response = self.vision.analyze_screenshot(png_bytes, prompt, system)
-        ctx.stats.api_calls += 1
+        ctx.stats.vision_calls += 1
 
         result = parse_calibration_result(response.text)
         stored_count = len(locally_found)
@@ -729,7 +752,7 @@ class StateHandlers:
         png = await self._wait_past_loading_local(ctx, config, label)
 
         text = self._call_vision(png, "identify_screen")
-        ctx.stats.api_calls += 1
+        ctx.stats.vision_calls += 1
         screen = parse_screen_identification(text)
         return png, screen
 
@@ -972,11 +995,16 @@ class StateHandlers:
         if red_candidates:
             candidates = red_candidates
 
+        # Score all slots and store priority tier for dashboard display
+        for s in tracker:
+            tier, _ = self._score_monument_slot(s, tracker, config)
+            tracker[s].priority_tier = tier
+
         # Exclude Tier 4 slots — they're well-defended and don't need checking yet
         if candidates:
             candidates = [
                 s for s in candidates
-                if self._score_monument_slot(s, tracker, config)[0] < 4
+                if tracker[s].priority_tier < 4
             ]
 
         if candidates:
@@ -1100,7 +1128,7 @@ class StateHandlers:
         info = self._read_monument_ocr(png, ctx, config)
         if info is None:
             text = self._call_vision(png, "check_monument")
-            ctx.stats.api_calls += 1
+            ctx.stats.vision_calls += 1
             info = parse_monument_info(text)
         ctx.monument_info = info
 
@@ -1356,7 +1384,7 @@ class StateHandlers:
         info = self._read_monument_ocr(png, ctx, config)
         if info is None:
             text = self._call_vision(png, "check_monument")
-            ctx.stats.api_calls += 1
+            ctx.stats.vision_calls += 1
             info = parse_monument_info(text)
         ctx.monument_info = info
 
@@ -1410,7 +1438,6 @@ class StateHandlers:
                 return BotState.OPENING_MINIMAP
             else:
                 # Defender was defeated — it's a victory
-                ctx.stats.battles_won += 1
                 ctx.last_progress_time = time.time()
                 ctx.stagnation_recovery_attempts = 0
                 self._record_victory(self._attacking_defender)
@@ -1519,8 +1546,9 @@ class StateHandlers:
     async def handle_contesting(self, ctx: BotContext, config: dict) -> BotState:
         """Rapid-poll a contested monument.
 
-        Stays at the monument, periodically closing/reopening the popup and
-        reading status with OCR. Attacks immediately when an enemy flip is detected.
+        Immediately closes and reopens the popup to read status (no long wait
+        before checking). If still friendly after the read, waits poll_interval
+        before the next check. Attacks immediately on enemy flip.
         Exits when the monument stabilizes or max duration is exceeded.
         """
         contest_cfg = config.get("contest", {})
@@ -1549,10 +1577,7 @@ class StateHandlers:
                 self._contest_until = 0.0
                 return BotState.OPENING_MINIMAP
 
-        # Wait between polls
-        await self._wait(poll_interval, jitter, "contest poll")
-
-        # Close popup if open
+        # Close popup, reopen, read — no long wait before checking
         await self.actions.close_popup()
         await self._wait(0.5, 0.1, "contest close")
 
@@ -1571,7 +1596,7 @@ class StateHandlers:
         info = self._read_monument_ocr(png, ctx, config)
         if info is None:
             text = self._call_vision(png, "check_monument")
-            ctx.stats.api_calls += 1
+            ctx.stats.vision_calls += 1
             info = parse_monument_info(text)
         ctx.monument_info = info
 
@@ -1615,7 +1640,8 @@ class StateHandlers:
                 ctx.log_action("Contest: enemy flip detected — attacking!")
                 return BotState.ATTACKING
 
-        # Still friendly — keep polling
+        # Still friendly — wait before next poll, then loop back
+        await self._wait(poll_interval, jitter, "contest poll wait")
         return BotState.CONTESTING
 
     async def handle_refreshing_popup(self, ctx: BotContext, config: dict) -> BotState:
@@ -1674,7 +1700,7 @@ class StateHandlers:
                 png = await self.capture.capture()
                 ctx.last_screenshot = png
                 text = self._call_vision(png, "identify_screen")
-                ctx.stats.api_calls += 1
+                ctx.stats.vision_calls += 1
                 current = parse_screen_identification(text)
                 ctx.log_action(f"Reconnect post-launch: screen={current.screen_type} (attempt {attempt + 1})")
 
@@ -1724,7 +1750,7 @@ class StateHandlers:
                 png = await self.capture.capture()
                 ctx.last_screenshot = png
                 text = self._call_vision(png, "identify_screen")
-                ctx.stats.api_calls += 1
+                ctx.stats.vision_calls += 1
                 current = parse_screen_identification(text)
                 ctx.log_action(f"Reconnect: screen={current.screen_type} (attempt {attempt + 1})")
 
@@ -1802,7 +1828,7 @@ class StateHandlers:
             await self._wait(float(sleep_secs), 0.05, "dormant sleep")
             self._dormant_seconds = None
         else:
-            idle_secs = random.uniform(10.0, 120.0)
+            idle_secs = random.uniform(10.0, 45.0)
             ctx.log_action(f"Idle — rechecking in {idle_secs:.0f}s")
             await self._wait(idle_secs, 0.15, "idle wait")
 
@@ -1922,7 +1948,7 @@ class StateHandlers:
         # Unknown screen — ask Vision for guidance
         ctx.log_action("Unknown screen — requesting recovery guidance from Vision")
         text = self._call_vision(png, "recovery_guidance")
-        ctx.stats.api_calls += 1
+        ctx.stats.vision_calls += 1
         guidance = parse_recovery_guidance(text)
 
         ctx.log_action(

@@ -102,8 +102,10 @@ check_monument:
 
     Key sections of the popup:
     - **Defenders**: Slots showing player names/avatars who are defending this monument.
-      Each slot shows a player name and a numeric power level. If the slot is empty, the
-      name area says "Not Garrisoned" and power is 0.
+      Each slot shows a player name and a NUMERIC POWER LEVEL (a number like "5,123" or
+      "12,456" displayed near or below the player name). Read this number carefully for
+      each active defender — it is critical for defense strategy. If the slot is empty
+      (shows "Not Garrisoned"), the power is 0.
     - **Monument Ownership** (at the bottom of the popup): This shows who currently owns
       the monument. The monument is friendly ONLY if BOTH conditions are met:
       1. The text is in BLUE color

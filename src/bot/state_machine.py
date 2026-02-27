@@ -38,11 +38,10 @@ class BotState(Enum):
 class BotStats:
     monuments_visited: int = 0
     battles_fought: int = 0
-    battles_won: int = 0
     defeats: int = 0
     monuments_captured: int = 0
-    api_calls: int = 0
-    total_cost: float = 0.0
+    vision_calls: int = 0
+    ocr_reads: int = 0
     errors: int = 0
     consecutive_errors: int = 0
     start_time: float = field(default_factory=time.time)
@@ -55,11 +54,10 @@ class BotStats:
         return {
             "monuments_visited": self.monuments_visited,
             "battles_fought": self.battles_fought,
-            "battles_won": self.battles_won,
             "defeats": self.defeats,
             "monuments_captured": self.monuments_captured,
-            "api_calls": self.api_calls,
-            "total_cost": round(self.total_cost, 4),
+            "vision_calls": self.vision_calls,
+            "ocr_reads": self.ocr_reads,
             "errors": self.errors,
             "consecutive_errors": self.consecutive_errors,
             "runtime_seconds": round(self.runtime_seconds, 1),
@@ -74,8 +72,9 @@ class MonumentRecord:
     last_status: str = "unknown"       # "friendly", "enemy", "unknown"
     owner_name: str = ""               # defender/owner name from popup
     check_count: int = 0               # total times popup was opened
-    flipped_to_enemy: int = 0          # times status changed TO enemy
-    flipped_to_friendly: int = 0       # times flipped TO friendly
+    flipped_to_enemy: int = 0          # times status changed TO enemy (all-time)
+    flipped_to_friendly: int = 0       # times flipped TO friendly (all-time)
+    flip_history: list = field(default_factory=list)  # list of {"time": ts, "from": str, "to": str}
     last_flip_time: float = 0.0        # timestamp of most recent flip
     last_flip_from: str = ""           # status before flip
     last_flip_to: str = ""             # status after flip
@@ -87,6 +86,17 @@ class MonumentRecord:
     defender_powers: list = field(default_factory=list)   # per-slot power values
     defender_names: list = field(default_factory=list)     # per-slot defender names
     flip_velocity: float = 0.0         # flips per hour (exponential moving average)
+    priority_tier: int = -1            # last computed scoring tier (0-4, -1=unknown)
+
+    def flips_since(self, seconds_ago: float) -> int:
+        """Count flips within the last N seconds."""
+        cutoff = time.time() - seconds_ago
+        return sum(1 for f in self.flip_history if f.get("time", 0) >= cutoff)
+
+    def prune_flip_history(self, max_age: float = 86400) -> None:
+        """Remove flip entries older than max_age seconds (default 24h)."""
+        cutoff = time.time() - max_age
+        self.flip_history = [f for f in self.flip_history if f.get("time", 0) >= cutoff]
 
 
 @dataclass
@@ -348,6 +358,10 @@ class StateMachine:
                     "garrison_power": rec.garrison_power,
                     "defender_names": rec.defender_names,
                     "flip_velocity": rec.flip_velocity,
+                    "flips_1h": rec.flips_since(3600),
+                    "flips_6h": rec.flips_since(21600),
+                    "flips_24h": rec.flips_since(86400),
+                    "priority_tier": rec.priority_tier,
                 }
                 for slot, rec in self.context.monument_tracker.items()
             },

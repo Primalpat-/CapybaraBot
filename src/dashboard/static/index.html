@@ -148,8 +148,37 @@
         .monument-card .status-text.enemy { color: #e57373; }
         .monument-card .status-text.friendly { color: #81c784; }
         .monument-card .status-text.unknown { color: #888; }
+        .monument-card .owner { font-size: 0.85em; margin-bottom: 4px; }
         .monument-card .timer { font-size: 0.8em; color: #8899aa; }
+        .monument-card .garrison-info { font-size: 0.8em; color: #b0bec5; margin-top: 4px; }
+        .monument-card .garrison-info .power-value { color: #e94560; font-weight: bold; }
+        .monument-card .defenders-list { font-size: 0.75em; color: #90a4ae; margin-top: 2px; }
         .monument-card .flip-count { font-size: 0.75em; color: #ffb74d; margin-top: 4px; }
+        .monument-card .flip-velocity { font-size: 0.75em; color: #ce93d8; }
+        .monument-card .contest-badge {
+            display: inline-block;
+            background: #e65100;
+            color: #fff;
+            font-size: 0.65em;
+            padding: 1px 6px;
+            border-radius: 8px;
+            margin-left: 4px;
+            font-weight: bold;
+        }
+        .monument-card .tier-badge {
+            display: inline-block;
+            font-size: 0.65em;
+            padding: 1px 6px;
+            border-radius: 8px;
+            margin-left: 4px;
+            font-weight: bold;
+        }
+        .tier-badge.tier-0 { background: #1b5e20; color: #a5d6a7; }
+        .tier-badge.tier-1 { background: #b71c1c; color: #ef9a9a; }
+        .tier-badge.tier-2 { background: #e65100; color: #ffcc80; }
+        .tier-badge.tier-3 { background: #37474f; color: #b0bec5; }
+        .tier-badge.tier-4 { background: #1a237e; color: #9fa8da; }
+        .monument-card .flip-breakdown { font-size: 0.7em; color: #8899aa; margin-top: 2px; }
 
         @media (max-width: 768px) {
             .container { grid-template-columns: 1fr; }
@@ -185,20 +214,20 @@
                     <div class="label">Battles Fought</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" id="stat-wins">0</div>
-                    <div class="label">Battles Won</div>
-                </div>
-                <div class="stat-card">
                     <div class="value" id="stat-captured">0</div>
                     <div class="label">Captured</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" id="stat-api">0</div>
-                    <div class="label">API Calls</div>
+                    <div class="value" id="stat-defeats">0</div>
+                    <div class="label">Defeats</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" id="stat-cost">$0.00</div>
-                    <div class="label">API Cost</div>
+                    <div class="value" id="stat-vision">0</div>
+                    <div class="label">Vision Calls</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="stat-ocr">0</div>
+                    <div class="label">OCR Reads</div>
                 </div>
                 <div class="stat-card">
                     <div class="value" id="stat-errors">0</div>
@@ -282,10 +311,10 @@
                 const s = data.stats;
                 document.getElementById('stat-monuments').textContent = s.monuments_visited;
                 document.getElementById('stat-battles').textContent = s.battles_fought;
-                document.getElementById('stat-wins').textContent = s.battles_won;
                 document.getElementById('stat-captured').textContent = s.monuments_captured;
-                document.getElementById('stat-api').textContent = s.api_calls;
-                document.getElementById('stat-cost').textContent = '$' + s.total_cost.toFixed(2);
+                document.getElementById('stat-defeats').textContent = s.defeats;
+                document.getElementById('stat-vision').textContent = s.vision_calls;
+                document.getElementById('stat-ocr').textContent = s.ocr_reads;
                 document.getElementById('stat-errors').textContent = s.errors;
                 document.getElementById('stat-runtime').textContent = formatRuntime(s.runtime_seconds);
 
@@ -303,12 +332,47 @@
                             ? formatTimeSince(m.last_checked)
                             : 'Never';
                         const statusClass = m.last_status === 'unknown' ? '' : `status-${m.last_status}`;
+                        const powerStr = m.garrison_power >= 0
+                            ? m.garrison_power.toLocaleString()
+                            : '?';
+                        const defenders = (m.defender_names || []);
+                        const defendersStr = defenders.length > 0
+                            ? defenders.join(', ')
+                            : '';
+                        const velStr = m.flip_velocity > 0
+                            ? `${m.flip_velocity.toFixed(1)}/hr`
+                            : '';
+                        const isContesting = data.state === 'CONTESTING'
+                            && data.current_target
+                            && data.current_target.slot === m.slot;
+                        const tierLabels = {
+                            0: 'WATCHING',
+                            1: 'URGENT',
+                            2: 'ATTACK',
+                            3: 'CHECK',
+                            4: 'SAFE',
+                        };
+                        const tierLabel = m.priority_tier >= 0
+                            ? tierLabels[m.priority_tier] || `T${m.priority_tier}`
+                            : '';
+                        const tierBadge = tierLabel
+                            ? `<span class="tier-badge tier-${m.priority_tier}">${tierLabel}</span>`
+                            : '';
+                        const f1h = m.flips_1h || 0;
+                        const f6h = m.flips_6h || 0;
+                        const f24h = m.flips_24h || 0;
+                        const flipBreakdown = (f1h > 0 || f6h > 0 || f24h > 0)
+                            ? `<div class="flip-breakdown">1h: ${f1h} | 6h: ${f6h} | 24h: ${f24h}</div>`
+                            : '';
                         return `<div class="monument-card ${statusClass}">
-                            <div class="slot-label">Slot ${m.slot}</div>
+                            <div class="slot-label">Slot ${m.slot}${tierBadge}${isContesting ? '<span class="contest-badge">CONTEST</span>' : ''}</div>
                             <div class="status-text ${m.last_status}">${m.last_status.toUpperCase()}</div>
                             <div class="owner">${m.owner_name || '\u2014'}</div>
+                            <div class="garrison-info">Power: <span class="power-value">${powerStr}</span></div>
+                            ${defendersStr ? `<div class="defenders-list">${defendersStr}</div>` : ''}
                             <div class="timer">Checked: ${ago}</div>
-                            <div class="flip-count">Flips: ${m.flipped_to_enemy}</div>
+                            <div class="flip-count">Flips: ${m.flipped_to_enemy}${velStr ? ` <span class="flip-velocity">(${velStr})</span>` : ''}</div>
+                            ${flipBreakdown}
                         </div>`;
                     }).join('');
                 }

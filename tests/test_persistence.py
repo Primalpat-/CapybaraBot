@@ -41,6 +41,10 @@ class TestMonumentTracker:
         tracker[1].defender_powers = [5000, 4000, 6000]
         tracker[1].defender_names = ["Alice", "Bob", "Carol"]
         tracker[1].flip_velocity = 2.5
+        tracker[1].flip_history = [
+            {"time": 900.0, "from": "enemy", "to": "friendly"},
+            {"time": 1000.0, "from": "friendly", "to": "enemy"},
+        ]
 
         with patch("src.bot.persistence.MONUMENT_FILE", tmp_path / "tracker.json"):
             with patch("src.bot.persistence.DATA_DIR", tmp_path):
@@ -62,6 +66,9 @@ class TestMonumentTracker:
         assert rec.defender_powers == [5000, 4000, 6000]
         assert rec.defender_names == ["Alice", "Bob", "Carol"]
         assert rec.flip_velocity == 2.5
+        assert len(rec.flip_history) == 2
+        assert rec.flip_history[0]["from"] == "enemy"
+        assert rec.flip_history[1]["to"] == "enemy"
 
     def test_backwards_compat_old_json(self, tmp_path):
         """Old JSON files missing new fields should load with defaults."""
@@ -86,6 +93,7 @@ class TestMonumentTracker:
         assert loaded[1].defender_powers == []
         assert loaded[1].defender_names == []
         assert loaded[1].flip_velocity == 0.0
+        assert loaded[1].flip_history == []
         # Slots 3 and 4 should be default records
         assert loaded[3].last_status == "unknown"
         assert loaded[4].check_count == 0
@@ -111,11 +119,10 @@ class TestCumulativeStats:
         session = BotStats()
         session.monuments_visited = 10
         session.battles_fought = 5
-        session.battles_won = 3
         session.defeats = 2
         session.monuments_captured = 1
-        session.api_calls = 20
-        session.total_cost = 0.05
+        session.vision_calls = 20
+        session.ocr_reads = 15
 
         existing = CumulativeStats()
 
@@ -127,20 +134,20 @@ class TestCumulativeStats:
         assert loaded.total_sessions == 1
         assert loaded.monuments_visited == 10
         assert loaded.battles_fought == 5
-        assert loaded.battles_won == 3
         assert loaded.defeats == 2
         assert loaded.monuments_captured == 1
-        assert loaded.api_calls == 20
+        assert loaded.vision_calls == 20
+        assert loaded.ocr_reads == 15
         assert loaded.first_session != ""
 
     def test_accumulation(self, tmp_path):
         """Multiple sessions accumulate correctly."""
         s1 = BotStats()
-        s1.battles_won = 5
+        s1.vision_calls = 5
         s1.defeats = 1
 
         s2 = BotStats()
-        s2.battles_won = 3
+        s2.vision_calls = 3
         s2.defeats = 2
 
         existing = CumulativeStats()
@@ -152,7 +159,7 @@ class TestCumulativeStats:
                 loaded = load_cumulative_stats()
 
         assert loaded.total_sessions == 2
-        assert loaded.battles_won == 8
+        assert loaded.vision_calls == 8
         assert loaded.defeats == 3
 
     def test_load_missing_file(self, tmp_path):
