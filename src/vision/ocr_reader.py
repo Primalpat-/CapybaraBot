@@ -413,34 +413,51 @@ def read_monument_popup(png_bytes: bytes) -> OCRMonumentReading:
     if ownership_name:
         reading.ownership_text = ownership_name
         name_lower = ownership_name.lower()
-        if ownership_color == "blue" and "star spirit" in name_lower:
+        # Name match takes priority over color — the bbox for the whole
+        # ownership line often picks up background reds from UI/crystals
+        if "star spirit" in name_lower:
             reading.is_friendly = True
         elif ownership_color == "red":
             reading.is_friendly = False
-        elif "star spirit" in name_lower:
+        elif ownership_color == "blue":
             reading.is_friendly = True
         else:
             reading.is_friendly = False
 
     # --- Find action button text ---
-    # Buttons are in the bottom ~25% of the popup, look for known button words
+    # Scan all button text in bottom ~30%, pick the most informative one.
+    # Priority: attack (enemy) > mining/visit (friendly) > exit/claim (neutral)
+    button_candidates = []
     for d in detections:
         if d["cy"] < 0.70:
             continue
         lower = d["text"].lower()
-        for word in ("attack", "exit", "visit", "claim"):
+        for word in ("attack", "exit", "visit", "claim", "quick", "mining"):
             if word in lower:
-                reading.action_button_text = d["text"]
-                confidences.append(d["conf"])
+                button_candidates.append({"text": d["text"], "lower": lower, "conf": d["conf"]})
                 break
-        if reading.action_button_text:
+
+    # Pick most informative button
+    for bc in button_candidates:
+        if "attack" in bc["lower"]:
+            reading.action_button_text = bc["text"]
+            confidences.append(bc["conf"])
             break
+    if not reading.action_button_text:
+        for bc in button_candidates:
+            if "mining" in bc["lower"] or "visit" in bc["lower"]:
+                reading.action_button_text = bc["text"]
+                confidences.append(bc["conf"])
+                break
+    if not reading.action_button_text and button_candidates:
+        reading.action_button_text = button_candidates[0]["text"]
+        confidences.append(button_candidates[0]["conf"])
 
     # Cross-check: button overrides ownership
     btn_lower = reading.action_button_text.lower()
     if "attack" in btn_lower:
         reading.is_friendly = False
-    elif "visit" in btn_lower:
+    elif any(w in btn_lower for w in ("visit", "mining", "exit")):
         reading.is_friendly = True
 
     # Compute overall confidence and total power
