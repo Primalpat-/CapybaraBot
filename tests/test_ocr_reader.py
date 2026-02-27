@@ -4,9 +4,11 @@ import numpy as np
 import pytest
 
 from src.vision.ocr_reader import (
+    _clean_name,
     _crop_region,
     _detect_text_color,
     _extract_power_number,
+    _is_name_text,
     _is_power_text,
     OCRMonumentReading,
     OCRDefenderReading,
@@ -56,6 +58,12 @@ class TestExtractPowerNumber:
     def test_suffix_with_surrounding_text(self):
         assert _extract_power_number("Power 24.68M total") == 24680000
 
+    def test_billions_suffix(self):
+        assert _extract_power_number("1.5B") == 1500000000
+
+    def test_trillions_suffix(self):
+        assert _extract_power_number("2.3T") == 2300000000000
+
 
 class TestDetectTextColor:
     """_detect_text_color(image, bbox) extracts color from bbox region."""
@@ -92,23 +100,94 @@ class TestDetectTextColor:
 
 
 class TestIsPowerText:
+    """Power text requires a magnitude suffix (K/M/B/T)."""
+
     def test_millions(self):
         assert _is_power_text("24.68M") is True
 
     def test_thousands(self):
         assert _is_power_text("14.28K") is True
 
-    def test_plain_number(self):
-        assert _is_power_text("12345") is True
+    def test_billions(self):
+        assert _is_power_text("1.5B") is True
 
-    def test_comma_number(self):
-        assert _is_power_text("12,345") is True
+    def test_trillions(self):
+        assert _is_power_text("2.3T") is True
+
+    def test_whole_suffix(self):
+        assert _is_power_text("3M") is True
+
+    def test_plain_number_no_suffix(self):
+        """Plain numbers without K/M/B/T suffix are NOT power text."""
+        assert _is_power_text("12345") is False
+        assert _is_power_text("12,345") is False
 
     def test_name_not_power(self):
         assert _is_power_text("Primalpat") is False
 
     def test_mixed_text(self):
         assert _is_power_text("Defense Info") is False
+
+    def test_level_monument_not_power(self):
+        """'Monument' M is not a suffix — letters follow it."""
+        assert _is_power_text("evel 11 Monument") is False
+        assert _is_power_text("Level 11 Monument") is False
+
+    def test_single_digit_not_power(self):
+        assert _is_power_text("9") is False
+        assert _is_power_text("2") is False
+
+    def test_earnings_not_power(self):
+        """Earnings text like '4500/hour' has no suffix."""
+        assert _is_power_text("4500/hour") is False
+        assert _is_power_text("450/hour") is False
+
+
+class TestIsNameText:
+    """Player names: 2+ alpha chars, not power/noise/button text."""
+
+    def test_player_name(self):
+        assert _is_name_text("Primalpat") is True
+
+    def test_player_name_with_quote(self):
+        assert _is_name_text("'Primalpat") is True
+
+    def test_short_name(self):
+        assert _is_name_text("Lonz") is True
+
+    def test_single_letter_not_name(self):
+        """OCR noise like 'U' or 'X' filtered out."""
+        assert _is_name_text("U") is False
+        assert _is_name_text("X") is False
+
+    def test_digit_not_name(self):
+        assert _is_name_text("2") is False
+        assert _is_name_text("123") is False
+
+    def test_noise_words_not_name(self):
+        assert _is_name_text("Defense Info") is False
+        assert _is_name_text("estimated") is False
+
+    def test_button_words_not_name(self):
+        assert _is_name_text("attack") is False
+        assert _is_name_text("Exit") is False
+
+    def test_power_text_not_name(self):
+        assert _is_name_text("24.68M") is False
+
+
+class TestCleanName:
+    def test_strips_leading_quote(self):
+        assert _clean_name("'Primalpat") == "Primalpat"
+
+    def test_strips_curly_quotes(self):
+        assert _clean_name("\u2018Sionna\u2019") == "Sionna"
+
+    def test_no_artifacts(self):
+        assert _clean_name("Lonz") == "Lonz"
+
+    def test_strips_backtick(self):
+        assert _clean_name("`Bob`") == "Bob"
 
 
 class TestCropRegion:

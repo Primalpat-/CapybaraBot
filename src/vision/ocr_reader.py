@@ -145,17 +145,15 @@ def _extract_power_number(text: str) -> int:
 
     cleaned = text.strip()
 
-    # Try number with M/K suffix first (e.g., "24.68M", "14.28K", "3M")
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*([MmKk])", cleaned)
+    # Try number with magnitude suffix (e.g., "24.68M", "14.28K", "3B")
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*([KkMmBbTt])", cleaned)
     if match:
         num_str = match.group(1).replace(",", ".")
         suffix = match.group(2).upper()
         try:
             value = float(num_str)
-            if suffix == "M":
-                return int(value * 1_000_000)
-            elif suffix == "K":
-                return int(value * 1_000)
+            multipliers = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000, "T": 1_000_000_000_000}
+            return int(value * multipliers.get(suffix, 1))
         except ValueError:
             pass
 
@@ -180,10 +178,12 @@ def _extract_power_number(text: str) -> int:
 
 
 def _is_power_text(text: str) -> bool:
-    """Check if text looks like a power value (e.g., '24.68M', '5,000')."""
-    return bool(re.search(r"\d+[.,]?\d*\s*[MmKk]", text)) or bool(
-        re.search(r"^[\d,]+$", text.strip())
-    )
+    """Power values always have a magnitude suffix (K/M/B/T).
+
+    Number directly followed by suffix letter, suffix not followed by more
+    letters (avoids "11 Monument" matching on "M").
+    """
+    return bool(re.search(r"\d+[.,]?\d*[KkMmBbTt](?![a-zA-Z])", text))
 
 
 _BUTTON_WORDS = {"attack", "exit", "visit", "claim", "quick", "mining"}
@@ -192,6 +192,29 @@ _NOISE_WORDS = {
     "subject", "actual", "output", "ownership", "guard", "guarding",
     "not", "garrisoned", "empty",
 }
+
+
+def _is_name_text(text: str) -> bool:
+    """Player names are the only alphabetic text in the defender section.
+
+    Must have 2+ alpha characters and not be a known header/noise/button word.
+    """
+    alpha_count = sum(1 for c in text if c.isalpha())
+    if alpha_count < 2:
+        return False
+    if _is_power_text(text):
+        return False
+    words = set(text.lower().split())
+    if words & _NOISE_WORDS:
+        return False
+    if words & _BUTTON_WORDS:
+        return False
+    return True
+
+
+def _clean_name(text: str) -> str:
+    """Strip common OCR artifacts (quotes, backticks) from player names."""
+    return text.strip().strip("'\"'\u2018\u2019\u201c\u201d`")
 
 
 def _center_y(bbox) -> float:
@@ -264,23 +287,128 @@ def read_monument_popup(png_bytes: bytes) -> OCRMonumentReading:
     reading = OCRMonumentReading()
     confidences = []
 
-    # --- Find ownership text ---
-    # Look for "Monument Ownership:" followed by a name on the same line
+    # --- Find section boundaries ---
+    # "Defense Info" and "Ownership Info" headers divide the popup into sections
+    defense_info_y = 0.0   # default: don't filter lower bound
+    ownership_info_y = 1.0  # default: don't filter upper bound
+    for d in detections:
+        lower = d["text"].lower()
+        if "defense" in lower and "info" in lower:
+            defense_info_y = d["cy"]
+        if "ownership" in lower and "info" in lower:
+            ownership_info_y = d["cy"]
+
+    # --- Find defenders (between Defense Info and Ownership Info) ---
+    # Powers always have K/M/B/T suffix; names are the only alpha text
+    power_entries = []
+    name_entries = []
+    for d in detections:
+        if d["cy"] <= defense_info_y or d["cy"] >= ownership_info_y:
+            continue
+        if _is_power_text(d["text"]):
+            power = _extract_power_number(d["text"])
+            if power > 0:
+                power_entries.append({
+                    "power": power,
+                    "cy": d["cy"],
+                    "cx": d["cx"],
+                    "conf": d["conf"],
+                    "text": d["text"],
+                })
+        elif _is_name_text(d["text"]):
+            name_entries.append({
+                "name": _clean_name(d["text"]),
+                "cy": d["cy"],
+                "conf": d["conf"],
+            })
+
+    # Sort power entries by vertical position (top to bottom = slot 1, 2, 3)
+    power_entries.sort(key=lambda p: p["cy"])
+
+    # Pair each power entry with the closest name by y-position
+    used_names = set()
+    defenders = []
+    for slot_idx, pe in enumerate(power_entries[:3]):  # max 3 defenders
+        slot_num = slot_idx + 1
+        best_name = ""
+        best_conf = 0.0
+        best_dist = 999.0
+        best_idx = -1
+
+        for i, ne in enumerate(name_entries):
+            if i in used_names:
+                continue
+            dy = abs(ne["cy"] - pe["cy"])
+            if dy < 0.08 and dy < best_dist:
+                best_name = ne["name"]
+                best_conf = ne["conf"]
+                best_dist = dy
+                best_idx = i
+
+        if best_idx >= 0:
+            used_names.add(best_idx)
+
+        defender = OCRDefenderReading(
+            slot=slot_num,
+            name=best_name,
+            power=pe["power"],
+            status="active",
+            confidence=pe["conf"],
+        )
+        confidences.append(pe["conf"])
+        if best_conf > 0:
+            confidences.append(best_conf)
+        defenders.append(defender)
+
+    # Fill remaining slots as empty (up to 3)
+    existing_slots = {d.slot for d in defenders}
+    for s in range(1, 4):
+        if s not in existing_slots:
+            defenders.append(OCRDefenderReading(slot=s, status="empty"))
+
+    defenders.sort(key=lambda d: d.slot)
+    reading.defenders = defenders
+
+    # --- Find ownership (below Ownership Info header) ---
+    # Faction name appears after "Monument Ownership:" text
     ownership_name = ""
     ownership_color = "unknown"
     for d in detections:
+        # Only search below Ownership Info header (when found)
+        if ownership_info_y < 1.0 and d["cy"] < ownership_info_y:
+            continue
         lower = d["text"].lower()
         if "ownership" in lower and "monument" in lower:
-            # The ownership label itself — look for the name nearby (similar y)
-            for d2 in detections:
-                if d2 is d:
-                    continue
-                if abs(d2["cy"] - d["cy"]) < 0.02 and d2["cx"] > d["cx"]:
-                    ownership_name = d2["text"]
-                    ownership_color = _detect_text_color(popup, d2["bbox"])
-                    confidences.append(d2["conf"])
-                    break
+            # Try to extract name from same text (e.g., "Monument Ownership: Star Spirit")
+            name_match = re.search(r"[Oo]wnership\s*:\s*(.+)", d["text"])
+            if name_match:
+                ownership_name = name_match.group(1).strip()
+                ownership_color = _detect_text_color(popup, d["bbox"])
+                confidences.append(d["conf"])
+            else:
+                # Name is a separate detection to the right at similar y
+                for d2 in detections:
+                    if d2 is d:
+                        continue
+                    if ownership_info_y < 1.0 and d2["cy"] < ownership_info_y:
+                        continue
+                    if abs(d2["cy"] - d["cy"]) < 0.03 and d2["cx"] > d["cx"]:
+                        ownership_name = d2["text"]
+                        ownership_color = _detect_text_color(popup, d2["bbox"])
+                        confidences.append(d2["conf"])
+                        break
             break
+
+    if not ownership_name:
+        # Fallback: look for faction names below Ownership Info header
+        for d in detections:
+            if ownership_info_y < 1.0 and d["cy"] < ownership_info_y:
+                continue
+            if "star spirit" in d["text"].lower():
+                ownership_name = d["text"]
+                ownership_color = _detect_text_color(popup, d["bbox"])
+                confidences.append(d["conf"])
+                break
 
     if ownership_name:
         reading.ownership_text = ownership_name
@@ -293,90 +421,6 @@ def read_monument_popup(png_bytes: bytes) -> OCRMonumentReading:
             reading.is_friendly = True
         else:
             reading.is_friendly = False
-    else:
-        # Fallback: look for "Star Spirit" anywhere
-        for d in detections:
-            if "star spirit" in d["text"].lower():
-                reading.ownership_text = d["text"]
-                color = _detect_text_color(popup, d["bbox"])
-                reading.is_friendly = (color == "blue")
-                confidences.append(d["conf"])
-                break
-
-    # --- Find power values and associate with defender names ---
-    # Power values match patterns like "24.68M", "14.28K", "5,000"
-    # They appear to the left/center of the popup, names to the right
-    power_entries = []
-    for d in detections:
-        if _is_power_text(d["text"]):
-            power = _extract_power_number(d["text"])
-            if power > 0:
-                power_entries.append({
-                    "power": power,
-                    "cy": d["cy"],
-                    "cx": d["cx"],
-                    "conf": d["conf"],
-                    "text": d["text"],
-                })
-
-    # Sort power entries by vertical position (top to bottom = slot 1, 2, 3)
-    power_entries.sort(key=lambda p: p["cy"])
-
-    # For each power entry, find the closest name-like text at a similar y position
-    # Names are typically to the right of center and DON'T look like power/noise
-    used_names = set()
-    defenders = []
-    for slot_idx, pe in enumerate(power_entries[:3]):  # max 3 defenders
-        slot_num = slot_idx + 1
-        best_name = ""
-        best_conf = 0.0
-
-        for d in detections:
-            if id(d) in used_names:
-                continue
-            # Must be at similar y position (within ~4% of popup height)
-            if abs(d["cy"] - pe["cy"]) > 0.04:
-                continue
-            # Skip power text, noise, and button words
-            lower = d["text"].lower()
-            if _is_power_text(d["text"]):
-                continue
-            words = set(lower.split())
-            if words & _NOISE_WORDS:
-                continue
-            if words & _BUTTON_WORDS:
-                continue
-            # Skip single digits (slot numbers like "1", "2", "3")
-            if re.match(r"^\d$", d["text"].strip()):
-                continue
-            # Prefer text that's further right (names are right of character art)
-            if d["cx"] > 0.3:
-                best_name = d["text"]
-                best_conf = d["conf"]
-                used_names.add(id(d))
-                break
-
-        defender = OCRDefenderReading(
-            slot=slot_num,
-            name=best_name,
-            power=pe["power"],
-            status="active" if best_name else "active",  # has power, so active
-            confidence=pe["conf"],
-        )
-        confidences.append(pe["conf"])
-        if best_conf > 0:
-            confidences.append(best_conf)
-        defenders.append(defender)
-
-    # Fill remaining slots as empty (up to 3)
-    existing_slots = {d.slot for d in defenders}
-    for s in range(1, 4):
-        if s not in existing_slots:
-            # Check if there's a "Not Garrisoned" text for this slot
-            defenders.append(OCRDefenderReading(slot=s, status="empty"))
-
-    defenders.sort(key=lambda d: d.slot)
-    reading.defenders = defenders
 
     # --- Find action button text ---
     # Buttons are in the bottom ~25% of the popup, look for known button words
