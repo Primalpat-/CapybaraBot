@@ -74,6 +74,7 @@ class StateHandlers:
         self._unbeatable_players: set[str] = set()  # players we've lost to
         self._attacking_defender: str | None = None  # defender we're currently fighting
         self._battle_result_png: bytes | None = None  # screenshot of battle result for defeat logging
+        self._contest_until: float = 0.0  # timestamp — stay at monument and fight until this time
         self._event_logger = None   # persistence.EventLogger, injected from main.py
         self._periodic_saver = None  # persistence.PeriodicSaver, injected from main.py
 
@@ -665,7 +666,7 @@ class StateHandlers:
 
         Returns (tier, tiebreaker) — sorted ascending, lower = higher priority.
         Tier 0: recently captured (post-capture watch)
-        Tier 1: contested (flips often)
+        Tier 1: contested (flips often) or vulnerable friendly (low/no garrison)
         Tier 2: default
         Tier 3: well-defended (skip until stale)
         """
@@ -683,6 +684,10 @@ class StateHandlers:
         # Tier 1: contested — flips often, likely to succeed
         if rec.flipped_to_enemy >= 2:
             return (1, -rec.flipped_to_enemy)
+
+        # Tier 1: vulnerable friendly — low or no garrison, needs monitoring
+        if rec.last_status == "friendly" and rec.garrison_count >= 0 and rec.garrison_count <= 1:
+            return (1, rec.last_checked)
 
         # Tier 3: well-defended — skip until recheck interval
         if (rec.consecutive_enemy_checks >= 3
@@ -771,6 +776,7 @@ class StateHandlers:
             "x": x,
             "y": y,
         }
+        self._contest_until = 0.0  # clear contest timer when switching targets
         ctx.log_action(f"Target: slot {target_slot} at ({x}, {y})")
 
         # Tap the monument icon on the minimap
@@ -866,9 +872,11 @@ class StateHandlers:
         ctx.monument_info = info
 
         # Cross-check: action button "Attack" means enemy, regardless of ownership text
-        if info.is_friendly and info.action_button.action_type == "attack":
+        btn_text = (info.action_button.text or "").lower()
+        btn_type = info.action_button.action_type
+        if info.is_friendly and (btn_type == "attack" or "attack" in btn_text):
             ctx.log_action(
-                "Ownership says friendly but action button says Attack — "
+                f"Ownership says friendly but action button says '{info.action_button.text}' — "
                 "overriding to enemy"
             )
             info.is_friendly = False
@@ -883,6 +891,9 @@ class StateHandlers:
             rec.check_count += 1
             rec.last_status = new_status
             rec.owner_name = info.ownership_text or info.ownership or ""
+            rec.garrison_count = sum(
+                1 for d in info.defenders if d.status == "active"
+            )
             # Monument check counts as meaningful progress
             ctx.last_progress_time = time.time()
             ctx.stagnation_recovery_attempts = 0
@@ -915,7 +926,17 @@ class StateHandlers:
         )
 
         if info.is_friendly:
+            # If contest timer active, stay and guard for flips
+            if time.time() < self._contest_until:
+                remaining = int(self._contest_until - time.time())
+                ctx.log_action(
+                    f"Friendly but contesting — guarding ({remaining}s remaining)"
+                )
+                await self.actions.close_popup()
+                await self._wait(15.0, 0.3, "contest guard wait")
+                return BotState.APPROACHING_MONUMENT
             ctx.log_action("Friendly monument — skipping")
+            self._contest_until = 0.0
             await self.actions.close_popup()
             return BotState.OPENING_MINIMAP
 
@@ -934,8 +955,15 @@ class StateHandlers:
                         ctx.log_action(
                             f"Skipping — defender '{defender.name}' is unbeatable"
                         )
+                        self._contest_until = 0.0
                         await self.actions.close_popup()
                         return BotState.OPENING_MINIMAP
+            # Start 5-minute contest timer on first attack at this monument
+            contest_secs = config.get("bot", {}).get("contest_duration", 300)
+            if self._contest_until == 0.0:
+                self._contest_until = time.time() + contest_secs
+                remaining = int(self._contest_until - time.time())
+                ctx.log_action(f"Starting {contest_secs}s contest timer for this monument")
             # Store the defender we're about to fight for post-battle tracking
             self._attacking_defender = None
             for defender in info.defenders:
@@ -1160,6 +1188,16 @@ class StateHandlers:
                 )
                 self._attacking_defender = None
                 self._battle_result_png = None
+                # If contest timer active, stay and keep watching for flips
+                if time.time() < self._contest_until:
+                    remaining = int(self._contest_until - time.time())
+                    ctx.log_action(
+                        f"Defeated but contesting — staying to watch ({remaining}s remaining)"
+                    )
+                    await self.actions.close_popup()
+                    await self._wait(15.0, 0.3, "contest post-defeat wait")
+                    return BotState.APPROACHING_MONUMENT
+                self._contest_until = 0.0
                 await self.actions.close_popup()
                 return BotState.OPENING_MINIMAP
             else:
@@ -1190,6 +1228,20 @@ class StateHandlers:
             if self._event_logger:
                 self._event_logger.log("monument_captured", slot=slot)
             ctx.log_action("Monument captured! (ownership is friendly)")
+
+            # Reset contest timer — guard for 5m after every capture
+            if self._contest_until > 0:
+                contest_secs = config.get("bot", {}).get("contest_duration", 300)
+                self._contest_until = time.time() + contest_secs
+                remaining = int(self._contest_until - time.time())
+                ctx.log_action(
+                    f"Contesting — guarding captured monument ({remaining}s remaining)"
+                )
+                await self.actions.close_popup()
+                await self._wait(15.0, 0.3, "contest guard wait")
+                return BotState.APPROACHING_MONUMENT
+
+            self._contest_until = 0.0
             await self.actions.close_popup()
             return BotState.OPENING_MINIMAP
 
@@ -1202,6 +1254,7 @@ class StateHandlers:
                         ctx.log_action(
                             f"Next defender '{defender.name}' is unbeatable — moving on"
                         )
+                        self._contest_until = 0.0
                         await self.actions.close_popup()
                         return BotState.OPENING_MINIMAP
 
@@ -1215,6 +1268,7 @@ class StateHandlers:
             return BotState.ATTACKING
 
         ctx.log_action("Post-battle: no attack available — moving on")
+        self._contest_until = 0.0
         await self.actions.close_popup()
         return BotState.OPENING_MINIMAP
 

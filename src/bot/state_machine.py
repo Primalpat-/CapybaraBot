@@ -81,6 +81,7 @@ class MonumentRecord:
     captured_at: float = 0.0           # when we last captured this slot
     times_captured: int = 0            # total captures by us
     consecutive_enemy_checks: int = 0  # consecutive checks where status=enemy
+    garrison_count: int = -1            # active defenders last seen (-1 = unknown)
 
 
 @dataclass

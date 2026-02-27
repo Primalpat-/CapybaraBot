@@ -244,7 +244,7 @@ def parse_monument_info(text: str) -> MonumentInfo:
     action_button = ActionButton(
         visible=bool(ab.get("visible", False)),
         text=ab.get("text", ""),
-        action_type=ab.get("action_type", "unknown"),
+        action_type=ab.get("action_type", "unknown").lower(),
     )
 
     is_friendly = data.get("is_friendly")
