@@ -328,6 +328,40 @@ class TestScoreMonumentSlot:
         tier, _ = h._score_monument_slot(1, tracker, cfg)
         assert tier == 3
 
+    def test_tier4_only_highest_power(self):
+        """Only the highest-power friendly monument gets SAFE; weaker ones stay CHECK."""
+        h = self._make_handlers()
+        cfg = self._make_config()
+        now = time.time()
+        tracker = {
+            1: MonumentRecord(
+                slot=1, last_status="friendly", flip_velocity=0.0,
+                garrison_count=3, garrison_power=40_000_000,
+                last_checked=now - 60,
+            ),
+            2: MonumentRecord(
+                slot=2, last_status="friendly", flip_velocity=0.0,
+                garrison_count=3, garrison_power=15_000_000,
+                last_checked=now - 60,
+            ),
+        }
+        tier1, _ = h._score_monument_slot(1, tracker, cfg)
+        tier2, _ = h._score_monument_slot(2, tracker, cfg)
+        assert tier1 == 4  # strongest → SAFE
+        assert tier2 == 3  # weaker → CHECK
+
+    def test_tier3_lower_power_checked_first(self):
+        """Within Tier 3, lower power gets a lower tiebreaker (checked sooner)."""
+        h = self._make_handlers()
+        cfg = self._make_config()
+        tracker = {
+            1: MonumentRecord(slot=1, garrison_power=20_000_000),
+            2: MonumentRecord(slot=2, garrison_power=5_000_000),
+        }
+        _, tie1 = h._score_monument_slot(1, tracker, cfg)
+        _, tie2 = h._score_monument_slot(2, tracker, cfg)
+        assert tie2 < tie1  # lower power = lower tiebreaker = checked first
+
 
 # ---------------------------------------------------------------------------
 # BotStats.defeats

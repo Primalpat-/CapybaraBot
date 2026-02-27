@@ -853,6 +853,23 @@ class StateHandlers:
                 f"Minimap open attempt #{self._minimap_open_attempts} — retrying"
             )
 
+        # After 3 failed attempts, do a Vision check to make sure we're actually
+        # in the game — we might be stuck on home_screen/mode_select/logged_out
+        if self._minimap_open_attempts == 3:
+            ctx.log_action("Multiple minimap failures — verifying we're in the game")
+            png = await self.capture.capture()
+            ctx.last_screenshot = png
+            _, screen = await self._identify_screen(png, ctx, config)
+            if screen.screen_type in ("home_screen", "mode_select", "logged_out", "android_home"):
+                ctx.log_action(f"Not in game ({screen.screen_type}) — entering reconnection flow")
+                self._minimap_open_attempts = 0
+                self._retries_without_progress = 0
+                return BotState.RECONNECTING
+            elif screen.screen_type in ("hibernation", "dormant_period"):
+                self._minimap_open_attempts = 0
+                self._retries_without_progress = 0
+                return BotState.INITIALIZING
+
         # Capture a screenshot to calibrate from (we're on the main map)
         png = await self.capture.capture()
         ctx.last_screenshot = png
@@ -933,17 +950,26 @@ class StateHandlers:
             tiebreaker = rec.garrison_power if rec.garrison_power >= 0 else 999999
             return (2, tiebreaker)
 
-        # Tier 4: well-defended friendly — high garrison, high power, no flips, checked recently
+        # Tier 4: SAFE — only the highest-power friendly monument gets skipped.
+        # Weaker friendly monuments stay in the rotation so we check them first.
         if (rec.last_status == "friendly"
                 and rec.flip_velocity < 0.5
                 and rec.garrison_count >= 3
-                and rec.garrison_power > power_vuln_threshold
+                and rec.garrison_power > 0
                 and rec.last_checked > 0
                 and (now - rec.last_checked) < recheck_secs):
-            return (4, rec.last_checked)
+            # Compare against all friendly monuments with known power
+            max_friendly_power = max(
+                (r.garrison_power for r in tracker.values()
+                 if r.last_status == "friendly" and r.garrison_power > 0),
+                default=0,
+            )
+            if rec.garrison_power >= max_friendly_power:
+                return (4, rec.last_checked)
 
-        # Tier 3: default — needs checking
-        return (3, rec.last_checked)
+        # Tier 3: default — needs checking (lower power = check sooner)
+        tiebreaker = rec.garrison_power if rec.garrison_power > 0 else -1
+        return (3, tiebreaker)
 
     async def handle_reading_minimap(self, ctx: BotContext, config: dict) -> BotState:
         """Read minimap using pixel color detection (no Vision API needed)."""
