@@ -101,6 +101,7 @@ def register_all_handlers(sm: StateMachine, handlers: StateHandlers) -> None:
     sm.register_handler(BotState.ATTACKING, handlers.handle_attacking)
     sm.register_handler(BotState.SKIPPING_BATTLE, handlers.handle_skipping_battle)
     sm.register_handler(BotState.POST_BATTLE, handlers.handle_post_battle)
+    sm.register_handler(BotState.CONTESTING, handlers.handle_contesting)
     sm.register_handler(BotState.REFRESHING_POPUP, handlers.handle_refreshing_popup)
     sm.register_handler(BotState.RECONNECTING, handlers.handle_reconnecting)
     sm.register_handler(BotState.IDLE, handlers.handle_idle)

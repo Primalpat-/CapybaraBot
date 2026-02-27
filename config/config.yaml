@@ -89,6 +89,10 @@ bot:
   clear_calibration_on_start: false
   # App crash recovery
   app_package: "com.habby.capybara"  # find with: adb shell pm list packages | grep -i capy
+  # Defender power limit (0 = no limit, skip defenders above this power)
+  max_beatable_defender_power: 0
+  # Consecutive defeats before marking a player unbeatable (allows retry)
+  max_defeats_before_skip: 2
   # Stagnation detection
   stagnation_timeout_seconds: 1800  # 30 min without monument progress
   max_recovery_attempts: 5          # then auto-pause
@@ -105,6 +109,19 @@ persistence:
   recheck_interval_seconds: 900     # 15 min — well-defended recheck
   post_capture_watch_seconds: 300   # 5 min — monitor after capture
   well_defended_threshold: 0        # max flipped_to_enemy to be "well-defended"
+
+ocr:
+  enabled: true
+  confidence_threshold: 0.4   # below this, fall back to Vision API
+  debug_save: false            # save cropped regions for tuning
+
+contest:
+  flip_velocity_threshold: 2.0      # flips/hour to trigger contest mode
+  recent_flip_seconds: 120          # flip within this window triggers
+  poll_interval_seconds: 18         # how often to check during contest
+  max_duration_seconds: 300         # max time in contest mode
+  stable_seconds: 120               # exit if friendly this long
+  power_vulnerability_threshold: 5000  # below this power = vulnerable
 
 input:
   # Tap jitter in pixels

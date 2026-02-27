@@ -99,8 +99,8 @@ class TestParseMonumentInfo:
             "is_friendly": false,
             "monument_name": "Tower Alpha",
             "defenders": [
-                {"slot": 1, "status": "active"},
-                {"slot": 2, "status": "defeated"}
+                {"slot": 1, "status": "active", "power": 5000},
+                {"slot": 2, "status": "defeated", "power": 3000}
             ],
             "all_defenders_defeated": false,
             "action_button": {
@@ -115,14 +115,48 @@ class TestParseMonumentInfo:
         assert result.monument_name == "Tower Alpha"
         assert len(result.defenders) == 2
         assert result.defenders[0].status == "active"
+        assert result.defenders[0].power == 5000
         assert result.action_button.visible is True
         assert result.action_button.action_type == "attack"
+        # total_garrison_power only counts active defenders
+        assert result.total_garrison_power == 5000
 
     def test_friendly_monument(self):
         text = '{"ownership": "player", "is_friendly": true, "monument_name": "", "defenders": [], "all_defenders_defeated": true, "action_button": {"visible": false, "text": ""}}'
         result = parse_monument_info(text)
         assert result.is_friendly is True
         assert result.all_defenders_defeated is True
+        assert result.total_garrison_power == 0
+
+    def test_power_defaults_to_zero(self):
+        """Defender without power field should default to 0."""
+        text = """{
+            "ownership": "enemy",
+            "is_friendly": false,
+            "monument_name": "",
+            "defenders": [
+                {"slot": 1, "status": "active", "name": "Alice"}
+            ],
+            "all_defenders_defeated": false,
+            "action_button": {"visible": true, "text": "Attack", "action_type": "attack"}
+        }"""
+        result = parse_monument_info(text)
+        assert result.defenders[0].power == 0
+
+    def test_power_with_commas(self):
+        """Power values with comma formatting should be parsed correctly."""
+        text = """{
+            "ownership": "enemy",
+            "is_friendly": false,
+            "monument_name": "",
+            "defenders": [
+                {"slot": 1, "status": "active", "name": "Alice", "power": "12,345"}
+            ],
+            "all_defenders_defeated": false,
+            "action_button": {"visible": true, "text": "Attack", "action_type": "attack"}
+        }"""
+        result = parse_monument_info(text)
+        assert result.defenders[0].power == 12345
 
 
 class TestParseNavigationCheck:

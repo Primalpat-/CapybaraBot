@@ -43,6 +43,7 @@ class DefenderInfo:
     slot: int
     status: str  # "active", "defeated", "empty"
     name: str = ""
+    power: int = 0
 
 
 @dataclass
@@ -61,6 +62,7 @@ class MonumentInfo:
     all_defenders_defeated: bool
     action_button: ActionButton
     ownership_text: str = ""
+    total_garrison_power: int = 0
 
 
 @dataclass
@@ -234,10 +236,16 @@ def parse_monument_info(text: str) -> MonumentInfo:
 
     defenders = []
     for d in data.get("defenders", []):
+        raw_power = d.get("power", 0)
+        try:
+            power = int(str(raw_power).replace(",", "").strip()) if raw_power else 0
+        except (ValueError, TypeError):
+            power = 0
         defenders.append(DefenderInfo(
             slot=int(d.get("slot", 0)),
             status=d.get("status", "unknown"),
             name=d.get("name", ""),
+            power=power,
         ))
 
     ab = data.get("action_button", {})
@@ -251,6 +259,10 @@ def parse_monument_info(text: str) -> MonumentInfo:
     if is_friendly is not None:
         is_friendly = bool(is_friendly)
 
+    total_garrison_power = sum(
+        d.power for d in defenders if d.status == "active"
+    )
+
     return MonumentInfo(
         ownership=data.get("ownership", "unknown"),
         is_friendly=is_friendly,
@@ -259,6 +271,7 @@ def parse_monument_info(text: str) -> MonumentInfo:
         all_defenders_defeated=bool(data.get("all_defenders_defeated", False)),
         action_button=action_button,
         ownership_text=data.get("ownership_text", ""),
+        total_garrison_power=total_garrison_power,
     )
 
 

@@ -16,7 +16,11 @@
       "Bash(C:/platform-tools/adb.exe connect:*)",
       "Bash(C:/platform-tools/adb.exe -s 127.0.0.1:5555 exec-out \"screencap -p | base64\" | head -c 100 2>&1)",
       "Bash(wc:*)",
-      "Bash(cd /c/Projects/CapybaraBot && /c/Python314/python -m pytest tests/ -v 2>&1)"
+      "Bash(cd /c/Projects/CapybaraBot && /c/Python314/python -m pytest tests/ -v 2>&1)",
+      "Bash(grep Vision API call: :*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(sed:*)"
     ]
   }
 }

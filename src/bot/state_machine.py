@@ -24,6 +24,7 @@ class BotState(Enum):
     ATTACKING = auto()
     SKIPPING_BATTLE = auto()
     POST_BATTLE = auto()
+    CONTESTING = auto()
     REFRESHING_POPUP = auto()
     RECONNECTING = auto()
     IDLE = auto()
@@ -81,7 +82,11 @@ class MonumentRecord:
     captured_at: float = 0.0           # when we last captured this slot
     times_captured: int = 0            # total captures by us
     consecutive_enemy_checks: int = 0  # consecutive checks where status=enemy
-    garrison_count: int = -1            # active defenders last seen (-1 = unknown)
+    garrison_count: int = -1           # active defenders last seen (-1 = unknown)
+    garrison_power: int = -1           # total power of active defenders (-1 = unknown)
+    defender_powers: list = field(default_factory=list)   # per-slot power values
+    defender_names: list = field(default_factory=list)     # per-slot defender names
+    flip_velocity: float = 0.0         # flips per hour (exponential moving average)
 
 
 @dataclass
@@ -166,7 +171,7 @@ class StateMachine:
         elapsed = time.time() - self.context.state_enter_time
         if elapsed > timeout and self.state not in (
             BotState.PAUSED, BotState.STOPPED, BotState.IDLE, BotState.RECONNECTING,
-            BotState.STAGNATION_RECOVERY,
+            BotState.STAGNATION_RECOVERY, BotState.CONTESTING,
         ):
             logger.warning(
                 f"Stuck in {self.state.name} for {elapsed:.1f}s (timeout={timeout}s)"
@@ -204,6 +209,7 @@ class StateMachine:
         exempt = (
             BotState.PAUSED, BotState.STOPPED, BotState.IDLE,
             BotState.STAGNATION_RECOVERY, BotState.RECONNECTING,
+            BotState.CONTESTING,
         )
         if self.state in exempt:
             return False
@@ -339,6 +345,9 @@ class StateMachine:
                     "captured_at": rec.captured_at,
                     "times_captured": rec.times_captured,
                     "consecutive_enemy_checks": rec.consecutive_enemy_checks,
+                    "garrison_power": rec.garrison_power,
+                    "defender_names": rec.defender_names,
+                    "flip_velocity": rec.flip_velocity,
                 }
                 for slot, rec in self.context.monument_tracker.items()
             },

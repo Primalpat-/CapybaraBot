@@ -37,6 +37,10 @@ class TestMonumentTracker:
         tracker[1].captured_at = 900.0
         tracker[1].times_captured = 3
         tracker[1].consecutive_enemy_checks = 4
+        tracker[1].garrison_power = 15000
+        tracker[1].defender_powers = [5000, 4000, 6000]
+        tracker[1].defender_names = ["Alice", "Bob", "Carol"]
+        tracker[1].flip_velocity = 2.5
 
         with patch("src.bot.persistence.MONUMENT_FILE", tmp_path / "tracker.json"):
             with patch("src.bot.persistence.DATA_DIR", tmp_path):
@@ -54,6 +58,10 @@ class TestMonumentTracker:
         assert rec.captured_at == 900.0
         assert rec.times_captured == 3
         assert rec.consecutive_enemy_checks == 4
+        assert rec.garrison_power == 15000
+        assert rec.defender_powers == [5000, 4000, 6000]
+        assert rec.defender_names == ["Alice", "Bob", "Carol"]
+        assert rec.flip_velocity == 2.5
 
     def test_backwards_compat_old_json(self, tmp_path):
         """Old JSON files missing new fields should load with defaults."""
@@ -73,6 +81,11 @@ class TestMonumentTracker:
         assert loaded[1].flipped_to_friendly == 0  # default
         assert loaded[1].captured_at == 0.0  # default
         assert loaded[1].consecutive_enemy_checks == 0  # default
+        # New fields should get defaults from old JSON
+        assert loaded[1].garrison_power == -1
+        assert loaded[1].defender_powers == []
+        assert loaded[1].defender_names == []
+        assert loaded[1].flip_velocity == 0.0
         # Slots 3 and 4 should be default records
         assert loaded[3].last_status == "unknown"
         assert loaded[4].check_count == 0
@@ -224,7 +237,11 @@ class TestScoreMonumentSlot:
                 "post_capture_watch_seconds": 300,
                 "recheck_interval_seconds": 900,
                 "well_defended_threshold": 0,
-            }
+            },
+            "contest": {
+                "flip_velocity_threshold": 2.0,
+                "power_vulnerability_threshold": 5000,
+            },
         }
         cfg["persistence"].update(overrides)
         return cfg
@@ -243,47 +260,66 @@ class TestScoreMonumentSlot:
         tier, _ = h._score_monument_slot(1, tracker, cfg)
         assert tier == 0
 
-    def test_tier1_contested(self):
+    def test_tier1_high_flip_velocity(self):
+        """High flip velocity → tier 1 (actively contested)."""
         h = self._make_handlers()
         cfg = self._make_config()
-        tracker = {1: MonumentRecord(slot=1, flipped_to_enemy=3)}
+        tracker = {1: MonumentRecord(slot=1, flip_velocity=3.0)}
         tier, _ = h._score_monument_slot(1, tracker, cfg)
         assert tier == 1
 
-    def test_tier2_default(self):
+    def test_tier1_vulnerable_friendly(self):
+        """Friendly with low garrison → tier 1."""
+        h = self._make_handlers()
+        cfg = self._make_config()
+        tracker = {1: MonumentRecord(slot=1, last_status="friendly", garrison_count=1)}
+        tier, _ = h._score_monument_slot(1, tracker, cfg)
+        assert tier == 1
+
+    def test_tier2_enemy(self):
+        """Enemy monument → tier 2."""
+        h = self._make_handlers()
+        cfg = self._make_config()
+        tracker = {1: MonumentRecord(slot=1, last_status="enemy")}
+        tier, _ = h._score_monument_slot(1, tracker, cfg)
+        assert tier == 2
+
+    def test_tier3_default(self):
         h = self._make_handlers()
         cfg = self._make_config()
         tracker = {1: MonumentRecord(slot=1)}
         tier, _ = h._score_monument_slot(1, tracker, cfg)
-        assert tier == 2
+        assert tier == 3
 
-    def test_tier3_stable_friendly(self):
-        """Fully garrisoned friendly with no flips → tier 3 (check every 15m)."""
+    def test_tier4_well_defended(self):
+        """Fully garrisoned, high power, no flips → tier 4 (skip until stale)."""
         h = self._make_handlers()
         cfg = self._make_config()
         tracker = {1: MonumentRecord(
             slot=1,
             last_status="friendly",
-            flipped_to_enemy=0,
+            flip_velocity=0.0,
             garrison_count=3,
+            garrison_power=10000,
             last_checked=time.time() - 60,  # checked recently
         )}
         tier, _ = h._score_monument_slot(1, tracker, cfg)
-        assert tier == 3
+        assert tier == 4
 
-    def test_tier3_becomes_tier2_when_stale(self):
-        """Stable friendly slot that hasn't been checked in a long time should be tier 2."""
+    def test_tier4_becomes_tier3_when_stale(self):
+        """Well-defended slot that hasn't been checked in a long time → tier 3."""
         h = self._make_handlers()
         cfg = self._make_config()
         tracker = {1: MonumentRecord(
             slot=1,
             last_status="friendly",
-            flipped_to_enemy=0,
+            flip_velocity=0.0,
             garrison_count=3,
+            garrison_power=10000,
             last_checked=time.time() - 1000,  # older than recheck_interval
         )}
         tier, _ = h._score_monument_slot(1, tracker, cfg)
-        assert tier == 2
+        assert tier == 3
 
 
 # ---------------------------------------------------------------------------

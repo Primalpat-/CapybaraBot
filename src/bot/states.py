@@ -33,6 +33,7 @@ from src.vision.parser import (
     parse_daily_popup_check,
     parse_timer_seconds,
 )
+from src.vision.ocr_reader import read_monument_popup
 from src.vision.prompts import get_prompt
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,9 @@ class StateHandlers:
         self._retries_without_progress = 0  # consecutive failures across states
         self._hibernation_seconds: int | None = None  # countdown from last detection
         self._dormant_seconds: int | None = None  # dormant period countdown
-        self._unbeatable_players: set[str] = set()  # players we've lost to
+        self._defeat_counts: dict[str, int] = {}  # player_name -> consecutive defeats
+        self._unbeatable_players: set[str] = set()  # derived: players exceeding max_defeats
+        self._last_unbeatable_decay: float = time.time()  # when we last decayed the list
         self._attacking_defender: str | None = None  # defender we're currently fighting
         self._battle_result_png: bytes | None = None  # screenshot of battle result for defeat logging
         self._contest_until: float = 0.0  # timestamp — stay at monument and fight until this time
@@ -384,6 +387,208 @@ class StateHandlers:
         self.cache.put(png_bytes, prompt_name, response.text)
         return response.text
 
+    def _read_monument_ocr(self, png: bytes, ctx: BotContext, config: dict):
+        """Try reading monument popup with local OCR.
+
+        Returns a MonumentInfo if OCR confidence is above threshold, else None
+        (caller should fall back to Vision API).
+        """
+        from src.vision.parser import MonumentInfo, DefenderInfo, ActionButton
+
+        ocr_cfg = config.get("ocr", {})
+        if not ocr_cfg.get("enabled", True):
+            return None
+
+        threshold = ocr_cfg.get("confidence_threshold", 0.4)
+
+        try:
+            reading = read_monument_popup(png)
+        except Exception as e:
+            logger.warning(f"OCR failed: {e}")
+            return None
+
+        if reading.overall_confidence < threshold:
+            logger.info(
+                f"OCR confidence too low ({reading.overall_confidence:.2f} < {threshold}) "
+                "— falling back to Vision API"
+            )
+            return None
+
+        # Convert OCRMonumentReading to MonumentInfo for compatibility
+        defenders = []
+        for d in reading.defenders:
+            defenders.append(DefenderInfo(
+                slot=d.slot,
+                status=d.status,
+                name=d.name,
+                power=d.power,
+            ))
+
+        btn_text = reading.action_button_text
+        btn_lower = btn_text.lower()
+        if "attack" in btn_lower:
+            action_type = "attack"
+        elif "claim" in btn_lower:
+            action_type = "claim"
+        elif "visit" in btn_lower:
+            action_type = "visit"
+        else:
+            action_type = "unknown"
+
+        info = MonumentInfo(
+            ownership="player" if reading.is_friendly else "enemy",
+            is_friendly=reading.is_friendly,
+            monument_name="",
+            defenders=defenders,
+            all_defenders_defeated=all(d.status != "active" for d in defenders),
+            action_button=ActionButton(
+                visible=bool(btn_text),
+                text=btn_text,
+                action_type=action_type,
+            ),
+            ownership_text=reading.ownership_text,
+            total_garrison_power=reading.total_garrison_power,
+        )
+
+        ctx.log_action(
+            f"OCR read: friendly={info.is_friendly}, "
+            f"button='{btn_text}', power={reading.total_garrison_power}, "
+            f"conf={reading.overall_confidence:.2f}"
+        )
+        return info
+
+    def _update_monument_tracker(self, slot: int, info, ctx: BotContext, config: dict) -> None:
+        """Update monument tracker with popup reading data (from OCR or Vision).
+
+        Handles: status tracking, flip detection, flip velocity, power tracking,
+        and progress timestamping. Extracted from handle_checking_monument to
+        share with handle_post_battle and handle_contesting.
+        """
+        if slot not in ctx.monument_tracker:
+            return
+
+        rec = ctx.monument_tracker[slot]
+        old_status = rec.last_status
+        new_status = "friendly" if info.is_friendly else "enemy"
+        rec.last_checked = time.time()
+        rec.check_count += 1
+        rec.last_status = new_status
+        rec.owner_name = info.ownership_text or info.ownership or ""
+        rec.garrison_count = sum(
+            1 for d in info.defenders if d.status == "active"
+        )
+
+        # Power tracking
+        rec.garrison_power = info.total_garrison_power
+        rec.defender_powers = [d.power for d in info.defenders if d.status == "active"]
+        rec.defender_names = [d.name for d in info.defenders if d.status == "active"]
+
+        # Monument check counts as meaningful progress
+        ctx.last_progress_time = time.time()
+        ctx.stagnation_recovery_attempts = 0
+
+        # Track consecutive enemy checks
+        if new_status == "enemy":
+            rec.consecutive_enemy_checks += 1
+        else:
+            rec.consecutive_enemy_checks = 0
+
+        # Track flips
+        if old_status and old_status != "unknown" and new_status != old_status:
+            now = time.time()
+            # Compute flip velocity (exponential moving average)
+            if rec.last_flip_time > 0:
+                hours_since = (now - rec.last_flip_time) / 3600.0
+                if hours_since > 0:
+                    instant_velocity = 1.0 / hours_since
+                    alpha = 0.3
+                    rec.flip_velocity = alpha * instant_velocity + (1 - alpha) * rec.flip_velocity
+            else:
+                # First flip — estimate at 1/hour
+                rec.flip_velocity = 1.0
+
+            rec.last_flip_time = now
+            rec.last_flip_from = old_status
+            rec.last_flip_to = new_status
+            if new_status == "enemy":
+                rec.flipped_to_enemy += 1
+                # Clear from visited for immediate re-prioritization
+                self._visited_slots.discard(slot)
+            elif new_status == "friendly":
+                rec.flipped_to_friendly += 1
+            if self._event_logger:
+                self._event_logger.log(
+                    "monument_flip", slot=slot,
+                    from_status=old_status, to_status=new_status,
+                    owner=rec.owner_name,
+                    flip_velocity=round(rec.flip_velocity, 2),
+                    garrison_power=rec.garrison_power,
+                )
+
+    def _can_beat_defender(self, defender, ctx: BotContext, config: dict) -> bool:
+        """Check if we should attempt to fight a defender.
+
+        Returns False if the defender is unbeatable or too powerful.
+        """
+        if not defender.name:
+            return True  # unknown defender, always try
+
+        if defender.name in self._unbeatable_players:
+            return False
+
+        max_power = config.get("bot", {}).get("max_beatable_defender_power", 0)
+        if max_power > 0 and defender.power > max_power:
+            logger.info(
+                f"Defender '{defender.name}' power {defender.power} exceeds max "
+                f"beatable {max_power} — skipping"
+            )
+            return False
+
+        return True
+
+    def _record_defeat(self, defender_name: str, ctx: BotContext, config: dict) -> None:
+        """Record a defeat against a defender, mark unbeatable after N consecutive."""
+        if not defender_name:
+            return
+
+        max_defeats = config.get("bot", {}).get("max_defeats_before_skip", 2)
+        count = self._defeat_counts.get(defender_name, 0) + 1
+        self._defeat_counts[defender_name] = count
+
+        if count >= max_defeats:
+            self._unbeatable_players.add(defender_name)
+            ctx.log_action(
+                f"Marked '{defender_name}' as unbeatable after {count} defeats "
+                f"({len(self._unbeatable_players)} total)"
+            )
+        else:
+            ctx.log_action(
+                f"Defeated by '{defender_name}' ({count}/{max_defeats} before skip)"
+            )
+
+    def _record_victory(self, defender_name: str) -> None:
+        """Record a victory — reset consecutive defeat counter for this player."""
+        if defender_name and defender_name in self._defeat_counts:
+            del self._defeat_counts[defender_name]
+        if defender_name and defender_name in self._unbeatable_players:
+            self._unbeatable_players.discard(defender_name)
+
+    def _decay_unbeatable_list(self) -> None:
+        """Periodically clear unbeatable list so we retry players after cooldown.
+
+        Called from handle_idle. Clears every 30 minutes.
+        """
+        decay_interval = 1800  # 30 minutes
+        if time.time() - self._last_unbeatable_decay >= decay_interval:
+            if self._unbeatable_players or self._defeat_counts:
+                logger.info(
+                    f"Decaying unbeatable list: clearing {len(self._unbeatable_players)} "
+                    f"players and {len(self._defeat_counts)} defeat counts"
+                )
+                self._unbeatable_players.clear()
+                self._defeat_counts.clear()
+            self._last_unbeatable_decay = time.time()
+
     def _calibrate_for_screen(self, png_bytes: bytes, screen_type: str, ctx: BotContext) -> None:
         """Calibrate UI elements: try local OpenCV detection first, Vision API fallback."""
         needed = self.calibrator.needs_calibration(screen_type)
@@ -666,39 +871,56 @@ class StateHandlers:
 
         Returns (tier, tiebreaker) — sorted ascending, lower = higher priority.
         Tier 0: recently captured (post-capture watch)
-        Tier 1: contested (flips often) or vulnerable friendly (low/no garrison)
-        Tier 2: default
-        Tier 3: well-defended (skip until stale)
+        Tier 1: high flip velocity or vulnerable friendly (low garrison/power)
+        Tier 2: enemy monument — needs capturing
+        Tier 3: default — needs checking
+        Tier 4: well-defended (skip until stale)
         """
         rec = tracker[slot]
         now = time.time()
         persist_cfg = config.get("persistence", {})
+        contest_cfg = config.get("contest", {})
         watch_secs = persist_cfg.get("post_capture_watch_seconds", 300)
         recheck_secs = persist_cfg.get("recheck_interval_seconds", 900)
-        threshold = persist_cfg.get("well_defended_threshold", 0)
+        flip_vel_threshold = contest_cfg.get("flip_velocity_threshold", 2.0)
+        power_vuln_threshold = contest_cfg.get("power_vulnerability_threshold", 5000)
 
         # Tier 0: recently captured — watch for counter-attack
         if rec.captured_at and (now - rec.captured_at) < watch_secs:
             return (0, rec.captured_at)
 
-        # Tier 1: contested — flips often, likely to succeed
-        if rec.flipped_to_enemy >= 2:
-            return (1, -rec.flipped_to_enemy)
+        # Tier 1: high flip velocity — monument is actively contested
+        if rec.flip_velocity >= flip_vel_threshold:
+            return (1, -rec.flip_velocity)
 
-        # Tier 1: vulnerable friendly — low or no garrison, needs monitoring
-        if rec.last_status == "friendly" and rec.garrison_count >= 0 and rec.garrison_count <= 1:
-            return (1, rec.last_checked)
+        # Tier 1: vulnerable friendly — low garrison or low power
+        if rec.last_status == "friendly":
+            is_low_garrison = rec.garrison_count >= 0 and rec.garrison_count <= 1
+            is_low_power = (rec.garrison_power >= 0
+                            and rec.garrison_power < power_vuln_threshold
+                            and rec.garrison_count > 0)
+            if is_low_garrison or is_low_power:
+                # Lower power = higher priority (more vulnerable)
+                tiebreaker = rec.garrison_power if rec.garrison_power >= 0 else 999999
+                return (1, tiebreaker)
 
-        # Tier 3: stable friendly — fully garrisoned, no flips, check every 15m
+        # Tier 2: enemy monument — needs capturing
+        if rec.last_status == "enemy":
+            # Lower power = easier to take, higher priority
+            tiebreaker = rec.garrison_power if rec.garrison_power >= 0 else 999999
+            return (2, tiebreaker)
+
+        # Tier 4: well-defended friendly — high garrison, high power, no flips, checked recently
         if (rec.last_status == "friendly"
-                and rec.flipped_to_enemy == 0
+                and rec.flip_velocity < 0.5
                 and rec.garrison_count >= 3
+                and rec.garrison_power > power_vuln_threshold
                 and rec.last_checked > 0
                 and (now - rec.last_checked) < recheck_secs):
-            return (3, rec.last_checked)
+            return (4, rec.last_checked)
 
-        # Tier 2: default
-        return (2, rec.last_checked)
+        # Tier 3: default — needs checking
+        return (3, rec.last_checked)
 
     async def handle_reading_minimap(self, ctx: BotContext, config: dict) -> BotState:
         """Read minimap using pixel color detection (no Vision API needed)."""
@@ -750,11 +972,11 @@ class StateHandlers:
         if red_candidates:
             candidates = red_candidates
 
-        # Exclude Tier 3 slots — they're stable and don't need checking yet
+        # Exclude Tier 4 slots — they're well-defended and don't need checking yet
         if candidates:
             candidates = [
                 s for s in candidates
-                if self._score_monument_slot(s, tracker, config)[0] < 3
+                if self._score_monument_slot(s, tracker, config)[0] < 4
             ]
 
         if candidates:
@@ -874,9 +1096,12 @@ class StateHandlers:
         # Calibrate popup elements if needed
         self._calibrate_for_screen(png, "monument_popup", ctx)
 
-        text = self._call_vision(png, "check_monument")
-        ctx.stats.api_calls += 1
-        info = parse_monument_info(text)
+        # Try OCR first (free, ~200ms), fall back to Vision API
+        info = self._read_monument_ocr(png, ctx, config)
+        if info is None:
+            text = self._call_vision(png, "check_monument")
+            ctx.stats.api_calls += 1
+            info = parse_monument_info(text)
         ctx.monument_info = info
 
         # Cross-check: action button "Attack" means enemy, regardless of ownership text
@@ -891,46 +1116,12 @@ class StateHandlers:
 
         # Update monument tracker with popup result
         slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
-        if slot in ctx.monument_tracker:
-            rec = ctx.monument_tracker[slot]
-            old_status = rec.last_status
-            new_status = "friendly" if info.is_friendly else "enemy"
-            rec.last_checked = time.time()
-            rec.check_count += 1
-            rec.last_status = new_status
-            rec.owner_name = info.ownership_text or info.ownership or ""
-            rec.garrison_count = sum(
-                1 for d in info.defenders if d.status == "active"
-            )
-            # Monument check counts as meaningful progress
-            ctx.last_progress_time = time.time()
-            ctx.stagnation_recovery_attempts = 0
-
-            # Track consecutive enemy checks
-            if new_status == "enemy":
-                rec.consecutive_enemy_checks += 1
-            else:
-                rec.consecutive_enemy_checks = 0
-
-            # Track flips
-            if old_status and old_status != "unknown" and new_status != old_status:
-                rec.last_flip_time = time.time()
-                rec.last_flip_from = old_status
-                rec.last_flip_to = new_status
-                if new_status == "enemy":
-                    rec.flipped_to_enemy += 1
-                elif new_status == "friendly":
-                    rec.flipped_to_friendly += 1
-                if self._event_logger:
-                    self._event_logger.log(
-                        "monument_flip", slot=slot,
-                        from_status=old_status, to_status=new_status,
-                        owner=rec.owner_name,
-                    )
+        self._update_monument_tracker(slot, info, ctx, config)
 
         ctx.log_action(
             f"Monument: {info.monument_name or 'unnamed'}, "
-            f"ownership={info.ownership}, friendly={info.is_friendly}"
+            f"ownership={info.ownership}, friendly={info.is_friendly}, "
+            f"power={info.total_garrison_power}"
         )
 
         if info.is_friendly:
@@ -943,6 +1134,12 @@ class StateHandlers:
                 await self.actions.close_popup()
                 await self._wait(15.0, 0.3, "contest guard wait")
                 return BotState.APPROACHING_MONUMENT
+            # Check if we should enter contest mode for this friendly monument
+            slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+            if slot and self._should_enter_contest(slot, ctx, config):
+                ctx.log_action("Friendly monument — entering contest mode (vulnerable/contested)")
+                await self.actions.close_popup()
+                return BotState.CONTESTING
             ctx.log_action("Friendly monument — skipping")
             self._contest_until = 0.0
             await self.actions.close_popup()
@@ -958,19 +1155,20 @@ class StateHandlers:
         if info.action_button.visible and info.action_button.action_type in ("attack", "unknown"):
             # Check if the next active defender is someone we can't beat
             for defender in info.defenders:
-                if defender.status == "active" and defender.name:
-                    if defender.name in self._unbeatable_players:
+                if defender.status == "active":
+                    if not self._can_beat_defender(defender, ctx, config):
                         ctx.log_action(
-                            f"Skipping — defender '{defender.name}' is unbeatable"
+                            f"Skipping — defender '{defender.name}' "
+                            f"(power={defender.power}) is unbeatable or too strong"
                         )
                         self._contest_until = 0.0
                         await self.actions.close_popup()
                         return BotState.OPENING_MINIMAP
+                    break  # only check the first active defender
             # Start 5-minute contest timer on first attack at this monument
             contest_secs = config.get("bot", {}).get("contest_duration", 300)
             if self._contest_until == 0.0:
                 self._contest_until = time.time() + contest_secs
-                remaining = int(self._contest_until - time.time())
                 ctx.log_action(f"Starting {contest_secs}s contest timer for this monument")
             # Store the defender we're about to fight for post-battle tracking
             self._attacking_defender = None
@@ -1154,16 +1352,23 @@ class StateHandlers:
             png = await self.capture.capture()
             ctx.last_screenshot = png
 
-        # Read the monument popup to check ownership (essential Vision call)
-        text = self._call_vision(png, "check_monument")
-        ctx.stats.api_calls += 1
-        info = parse_monument_info(text)
+        # Read the monument popup — try OCR first, Vision API fallback
+        info = self._read_monument_ocr(png, ctx, config)
+        if info is None:
+            text = self._call_vision(png, "check_monument")
+            ctx.stats.api_calls += 1
+            info = parse_monument_info(text)
         ctx.monument_info = info
+
+        # Update tracker with power data
+        slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+        self._update_monument_tracker(slot, info, ctx, config)
 
         ctx.log_action(
             f"Post-battle monument: ownership={info.ownership}, "
             f"is_friendly={info.is_friendly}, "
-            f"ownership_text='{info.ownership_text}'"
+            f"ownership_text='{info.ownership_text}', "
+            f"power={info.total_garrison_power}"
         )
 
         # Detect defeat: the defender we attacked is still active
@@ -1176,7 +1381,6 @@ class StateHandlers:
                 ctx.stats.defeats += 1
                 ctx.last_progress_time = time.time()
                 ctx.stagnation_recovery_attempts = 0
-                slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
                 if self._event_logger:
                     self._event_logger.log(
                         "battle_lost", slot=slot,
@@ -1189,11 +1393,7 @@ class StateHandlers:
                     defeat_path = defeat_dir / f"defeat_{int(time.time())}.png"
                     defeat_path.write_bytes(self._battle_result_png)
                     logger.info(f"Saved defeat screenshot: {defeat_path}")
-                self._unbeatable_players.add(self._attacking_defender)
-                ctx.log_action(
-                    f"DEFEAT by '{self._attacking_defender}' — added to unbeatable list "
-                    f"({len(self._unbeatable_players)} total: {self._unbeatable_players})"
-                )
+                self._record_defeat(self._attacking_defender, ctx, config)
                 self._attacking_defender = None
                 self._battle_result_png = None
                 # If contest timer active, stay and keep watching for flips
@@ -1213,7 +1413,7 @@ class StateHandlers:
                 ctx.stats.battles_won += 1
                 ctx.last_progress_time = time.time()
                 ctx.stagnation_recovery_attempts = 0
-                slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+                self._record_victory(self._attacking_defender)
                 if self._event_logger:
                     self._event_logger.log(
                         "battle_won", slot=slot,
@@ -1228,7 +1428,6 @@ class StateHandlers:
             ctx.stats.monuments_captured += 1
             ctx.last_progress_time = time.time()
             ctx.stagnation_recovery_attempts = 0
-            slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
             if slot in ctx.monument_tracker:
                 rec = ctx.monument_tracker[slot]
                 rec.captured_at = time.time()
@@ -1237,17 +1436,11 @@ class StateHandlers:
                 self._event_logger.log("monument_captured", slot=slot)
             ctx.log_action("Monument captured! (ownership is friendly)")
 
-            # Reset contest timer — guard for 5m after every capture
-            if self._contest_until > 0:
-                contest_secs = config.get("bot", {}).get("contest_duration", 300)
-                self._contest_until = time.time() + contest_secs
-                remaining = int(self._contest_until - time.time())
-                ctx.log_action(
-                    f"Contesting — guarding captured monument ({remaining}s remaining)"
-                )
+            # Enter contest mode if the monument is contested
+            if self._should_enter_contest(slot, ctx, config):
+                ctx.log_action("Post-capture — entering contest mode to guard")
                 await self.actions.close_popup()
-                await self._wait(15.0, 0.3, "contest guard wait")
-                return BotState.APPROACHING_MONUMENT
+                return BotState.CONTESTING
 
             self._contest_until = 0.0
             await self.actions.close_popup()
@@ -1255,16 +1448,18 @@ class StateHandlers:
 
         # Not captured yet — are there more defenders to fight?
         if info.action_button.visible and info.action_button.action_type in ("attack", "unknown"):
-            # Check unbeatable list before attacking next defender
+            # Check if next defender is beatable
             for defender in info.defenders:
-                if defender.status == "active" and defender.name:
-                    if defender.name in self._unbeatable_players:
+                if defender.status == "active":
+                    if not self._can_beat_defender(defender, ctx, config):
                         ctx.log_action(
-                            f"Next defender '{defender.name}' is unbeatable — moving on"
+                            f"Next defender '{defender.name}' "
+                            f"(power={defender.power}) is unbeatable — moving on"
                         )
                         self._contest_until = 0.0
                         await self.actions.close_popup()
                         return BotState.OPENING_MINIMAP
+                    break  # only check the first active defender
 
             # Store the next defender before attacking
             self._attacking_defender = None
@@ -1279,6 +1474,149 @@ class StateHandlers:
         self._contest_until = 0.0
         await self.actions.close_popup()
         return BotState.OPENING_MINIMAP
+
+    def _should_enter_contest(self, slot: int, ctx: BotContext, config: dict) -> bool:
+        """Decide whether to enter contest mode for a monument slot.
+
+        Enter contest when:
+        - Just captured (< 30s ago)
+        - High flip velocity (above threshold)
+        - Recent flip (within recent_flip_seconds)
+        - Vulnerable friendly with recent check
+        """
+        if slot not in ctx.monument_tracker:
+            return False
+
+        contest_cfg = config.get("contest", {})
+        rec = ctx.monument_tracker[slot]
+        now = time.time()
+
+        # Just captured
+        if rec.captured_at and (now - rec.captured_at) < 30:
+            return True
+
+        # High flip velocity
+        vel_threshold = contest_cfg.get("flip_velocity_threshold", 2.0)
+        if rec.flip_velocity >= vel_threshold:
+            return True
+
+        # Recent flip
+        recent_secs = contest_cfg.get("recent_flip_seconds", 120)
+        if rec.last_flip_time > 0 and (now - rec.last_flip_time) < recent_secs:
+            return True
+
+        # Vulnerable friendly
+        power_threshold = contest_cfg.get("power_vulnerability_threshold", 5000)
+        if (rec.last_status == "friendly"
+                and rec.garrison_power >= 0
+                and rec.garrison_power < power_threshold
+                and rec.last_checked > 0
+                and (now - rec.last_checked) < 60):
+            return True
+
+        return False
+
+    async def handle_contesting(self, ctx: BotContext, config: dict) -> BotState:
+        """Rapid-poll a contested monument.
+
+        Stays at the monument, periodically closing/reopening the popup and
+        reading status with OCR. Attacks immediately when an enemy flip is detected.
+        Exits when the monument stabilizes or max duration is exceeded.
+        """
+        contest_cfg = config.get("contest", {})
+        timing = config.get("timing", {})
+        jitter = timing.get("jitter_factor", 0.3)
+        poll_interval = contest_cfg.get("poll_interval_seconds", 18)
+        max_duration = contest_cfg.get("max_duration_seconds", 300)
+        stable_secs = contest_cfg.get("stable_seconds", 120)
+
+        slot = ctx.current_target.get("slot", 0) if ctx.current_target else 0
+        rec = ctx.monument_tracker.get(slot) if slot else None
+
+        # Check exit: max duration
+        if time.time() - ctx.state_enter_time > max_duration:
+            ctx.log_action(f"Contest mode expired ({max_duration}s) — moving on")
+            self._contest_until = 0.0
+            return BotState.OPENING_MINIMAP
+
+        # Check exit: monument stable (friendly for stable_secs)
+        if rec and rec.last_status == "friendly" and rec.last_checked > 0:
+            friendly_duration = time.time() - rec.last_flip_time if rec.last_flip_time > 0 else 999999
+            if friendly_duration >= stable_secs:
+                ctx.log_action(
+                    f"Monument stable for {friendly_duration:.0f}s — exiting contest"
+                )
+                self._contest_until = 0.0
+                return BotState.OPENING_MINIMAP
+
+        # Wait between polls
+        await self._wait(poll_interval, jitter, "contest poll")
+
+        # Close popup if open
+        await self.actions.close_popup()
+        await self._wait(0.5, 0.1, "contest close")
+
+        # Tap monument to reopen popup
+        x, y = self.calibrator.get_pixel("world_monument")
+        if x > 0 and y > 0:
+            await self.input.tap(x, y)
+        else:
+            await self.input.tap(self._screen_w // 2, self._screen_h // 2)
+        await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "contest popup wait")
+
+        # Read popup
+        png = await self.capture.capture()
+        ctx.last_screenshot = png
+
+        info = self._read_monument_ocr(png, ctx, config)
+        if info is None:
+            text = self._call_vision(png, "check_monument")
+            ctx.stats.api_calls += 1
+            info = parse_monument_info(text)
+        ctx.monument_info = info
+
+        # Cross-check button text
+        btn_text = (info.action_button.text or "").lower()
+        btn_type = info.action_button.action_type
+        if info.is_friendly and (btn_type == "attack" or "attack" in btn_text):
+            info.is_friendly = False
+
+        # Update tracker
+        self._update_monument_tracker(slot, info, ctx, config)
+
+        ctx.log_action(
+            f"Contest poll: friendly={info.is_friendly}, "
+            f"power={info.total_garrison_power}"
+        )
+
+        # Enemy detected — attack immediately
+        if not info.is_friendly:
+            if info.action_button.visible and info.action_button.action_type in ("attack", "unknown"):
+                # Check if defender is beatable
+                for defender in info.defenders:
+                    if defender.status == "active":
+                        if not self._can_beat_defender(defender, ctx, config):
+                            ctx.log_action(
+                                f"Contest: defender '{defender.name}' unbeatable — exiting"
+                            )
+                            self._contest_until = 0.0
+                            await self.actions.close_popup()
+                            return BotState.OPENING_MINIMAP
+                        break
+
+                # Set up contest timer and attack
+                contest_secs = config.get("bot", {}).get("contest_duration", 300)
+                self._contest_until = time.time() + contest_secs
+                self._attacking_defender = None
+                for defender in info.defenders:
+                    if defender.status == "active" and defender.name:
+                        self._attacking_defender = defender.name
+                        break
+                ctx.log_action("Contest: enemy flip detected — attacking!")
+                return BotState.ATTACKING
+
+        # Still friendly — keep polling
+        return BotState.CONTESTING
 
     async def handle_refreshing_popup(self, ctx: BotContext, config: dict) -> BotState:
         """Close and reopen the popup to fight the next defender."""
@@ -1467,6 +1805,9 @@ class StateHandlers:
             idle_secs = random.uniform(10.0, 120.0)
             ctx.log_action(f"Idle — rechecking in {idle_secs:.0f}s")
             await self._wait(idle_secs, 0.15, "idle wait")
+
+        # Decay unbeatable list so we retry players after cooldown
+        self._decay_unbeatable_list()
 
         # Clear visited slots so we retry all monuments (their popup is the
         # only way to get real status, so we need to reopen each one).

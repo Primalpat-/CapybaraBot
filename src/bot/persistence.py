@@ -97,6 +97,11 @@ def save_monument_tracker(tracker: dict[int, MonumentRecord]) -> None:
             "captured_at": rec.captured_at,
             "times_captured": rec.times_captured,
             "consecutive_enemy_checks": rec.consecutive_enemy_checks,
+            "garrison_count": rec.garrison_count,
+            "garrison_power": rec.garrison_power,
+            "defender_powers": rec.defender_powers,
+            "defender_names": rec.defender_names,
+            "flip_velocity": rec.flip_velocity,
         }
     _ensure_data_dir()
     _atomic_write(MONUMENT_FILE, json.dumps(data, indent=2))
@@ -126,6 +131,11 @@ def load_monument_tracker() -> dict[int, MonumentRecord]:
                 rec.captured_at = vals.get("captured_at", 0.0)
                 rec.times_captured = vals.get("times_captured", 0)
                 rec.consecutive_enemy_checks = vals.get("consecutive_enemy_checks", 0)
+                rec.garrison_count = vals.get("garrison_count", -1)
+                rec.garrison_power = vals.get("garrison_power", -1)
+                rec.defender_powers = vals.get("defender_powers", [])
+                rec.defender_names = vals.get("defender_names", [])
+                rec.flip_velocity = vals.get("flip_velocity", 0.0)
         logger.info("Monument tracker loaded from disk")
     except Exception:
         logger.warning("Failed to load monument tracker, using defaults", exc_info=True)

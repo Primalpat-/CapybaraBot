@@ -1,4 +1,5 @@
 anthropic>=0.82.0
+easyocr>=1.7.0
 Pillow>=12.0.0
 opencv-python>=4.10.0
 numpy>=2.0.0
