@@ -106,7 +106,8 @@ dashboard:
 
 persistence:
   save_interval_seconds: 60
-  recheck_interval_seconds: 900     # 15 min — well-defended recheck
+  recheck_interval_seconds: 900     # 15 min — SAFE monument recheck
+  check_recheck_interval_seconds: 600  # 10 min — CHECK monument recheck (when no urgent)
   post_capture_watch_seconds: 300   # 5 min — monitor after capture
   well_defended_threshold: 0        # max flipped_to_enemy to be "well-defended"
 

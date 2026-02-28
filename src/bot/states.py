@@ -1026,12 +1026,28 @@ class StateHandlers:
             tier, _ = self._score_monument_slot(s, tracker, config)
             tracker[s].priority_tier = tier
 
-        # Exclude Tier 4 slots — they're well-defended and don't need checking yet
-        if candidates:
+        # Split candidates by urgency:
+        # - Urgent (tier 0-2): always visit — bounce between these exclusively
+        # - Check (tier 3): only visit if no urgent slots, and only if stale
+        # - Safe (tier 4): skip until stale (handled by scoring)
+        check_recheck_secs = persist_cfg.get("check_recheck_interval_seconds", 600)
+        now = time.time()
+
+        urgent = [s for s in candidates if tracker[s].priority_tier <= 2]
+        if urgent:
+            # Focus exclusively on urgent monuments
+            candidates = urgent
+        else:
+            # No urgent — visit CHECK slots only if they haven't been checked recently
             candidates = [
                 s for s in candidates
-                if tracker[s].priority_tier < 4
+                if tracker[s].priority_tier < 3
+                or (tracker[s].priority_tier == 3
+                    and (tracker[s].last_checked <= 0
+                         or (now - tracker[s].last_checked) >= check_recheck_secs))
             ]
+            # Still exclude SAFE (tier 4)
+            candidates = [s for s in candidates if tracker[s].priority_tier < 4]
 
         if candidates:
             candidates.sort(key=lambda s: self._score_monument_slot(s, tracker, config))
