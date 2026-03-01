@@ -33,7 +33,7 @@ from src.vision.parser import (
     parse_daily_popup_check,
     parse_timer_seconds,
 )
-from src.vision.ocr_reader import read_monument_popup
+from src.vision.ocr_reader import read_monument_popup, check_screen_ocr
 from src.vision.prompts import get_prompt
 
 logger = logging.getLogger(__name__)
@@ -925,13 +925,23 @@ class StateHandlers:
         flip_vel_threshold = contest_cfg.get("flip_velocity_threshold", 2.0)
         power_vuln_threshold = contest_cfg.get("power_vulnerability_threshold", 5000)
 
+        # Compute effective flip velocity with time-based decay.
+        # Half-life of 30 minutes: if no flip for 30 min, velocity halves.
+        # This prevents monuments from being stuck on "urgent" forever.
+        # Write the decayed value back so the dashboard UI reflects reality.
+        effective_flip_velocity = rec.flip_velocity
+        if rec.last_flip_time > 0 and rec.flip_velocity > 0:
+            hours_since = (now - rec.last_flip_time) / 3600.0
+            effective_flip_velocity = rec.flip_velocity * (0.5 ** (hours_since / 0.5))
+            rec.flip_velocity = effective_flip_velocity
+
         # Tier 0: recently captured — watch for counter-attack
         if rec.captured_at and (now - rec.captured_at) < watch_secs:
             return (0, rec.captured_at)
 
         # Tier 1: high flip velocity — monument is actively contested
-        if rec.flip_velocity >= flip_vel_threshold:
-            return (1, -rec.flip_velocity)
+        if effective_flip_velocity >= flip_vel_threshold:
+            return (1, -effective_flip_velocity)
 
         # Tier 1: vulnerable friendly — low garrison or low power
         if rec.last_status == "friendly":
@@ -953,7 +963,7 @@ class StateHandlers:
         # Tier 4: SAFE — only the highest-power friendly monument gets skipped.
         # Weaker friendly monuments stay in the rotation so we check them first.
         if (rec.last_status == "friendly"
-                and rec.flip_velocity < 0.5
+                and effective_flip_velocity < 0.5
                 and rec.garrison_count >= 3
                 and rec.garrison_power > 0
                 and rec.last_checked > 0
@@ -1027,26 +1037,24 @@ class StateHandlers:
             tracker[s].priority_tier = tier
 
         # Split candidates by urgency:
-        # - Urgent (tier 0-2): always visit — bounce between these exclusively
-        # - Check (tier 3): only visit if no urgent slots, and only if stale
-        # - Safe (tier 4): skip until stale (handled by scoring)
+        # - Urgent (tier 0-2): every cycle
+        # - Check (tier 3): every cycle when no urgent; every 10 min when urgent exist
+        # - Safe (tier 4): every 15 min (handled by scoring — stale SAFE becomes tier 3)
         check_recheck_secs = persist_cfg.get("check_recheck_interval_seconds", 600)
         now = time.time()
 
         urgent = [s for s in candidates if tracker[s].priority_tier <= 2]
         if urgent:
-            # Focus exclusively on urgent monuments
-            candidates = urgent
+            # Urgent every cycle + CHECK only if stale (10 min)
+            filtered = list(urgent)
+            for s in candidates:
+                if tracker[s].priority_tier == 3:
+                    if (tracker[s].last_checked <= 0
+                            or (now - tracker[s].last_checked) >= check_recheck_secs):
+                        filtered.append(s)
+            candidates = filtered
         else:
-            # No urgent — visit CHECK slots only if they haven't been checked recently
-            candidates = [
-                s for s in candidates
-                if tracker[s].priority_tier < 3
-                or (tracker[s].priority_tier == 3
-                    and (tracker[s].last_checked <= 0
-                         or (now - tracker[s].last_checked) >= check_recheck_secs))
-            ]
-            # Still exclude SAFE (tier 4)
+            # No urgent — cycle through all CHECK monuments, skip SAFE
             candidates = [s for s in candidates if tracker[s].priority_tier < 4]
 
         if candidates:
@@ -1881,9 +1889,35 @@ class StateHandlers:
         # only way to get real status, so we need to reopen each one).
         self._visited_slots.clear()
 
-        # Check locally whether the minimap is still open — no Vision needed
+        # Quick OCR check for hibernation/dormant before resuming
         png = await self.capture.capture()
         ctx.last_screenshot = png
+
+        ocr_screen = check_screen_ocr(png)
+        if ocr_screen.screen_type == "hibernation":
+            secs = parse_timer_seconds(ocr_screen.timer)
+            if secs and secs > 0:
+                self._hibernation_seconds = secs
+                ctx.log_action(f"OCR detected hibernation ({ocr_screen.timer}) — sleeping")
+                if self._event_logger:
+                    self._event_logger.log("hibernation_start", duration=secs, source="ocr")
+                return BotState.IDLE
+            else:
+                ctx.log_action("OCR detected hibernation but timer unreadable — using Vision")
+                return BotState.INITIALIZING
+        elif ocr_screen.screen_type == "dormant_period":
+            secs = parse_timer_seconds(ocr_screen.timer)
+            if secs and secs > 0:
+                self._dormant_seconds = secs
+                ctx.log_action(f"OCR detected dormant period ({ocr_screen.timer}) — sleeping")
+                if self._event_logger:
+                    self._event_logger.log("dormant_start", duration=secs, source="ocr")
+                return BotState.IDLE
+            else:
+                ctx.log_action("OCR detected dormant but timer unreadable — using Vision")
+                return BotState.INITIALIZING
+
+        # Check locally whether the minimap is still open — no Vision needed
         detection = find_minimap_squares(png)
 
         if detection and len(detection.squares) >= 2:

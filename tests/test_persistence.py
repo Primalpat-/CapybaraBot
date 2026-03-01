@@ -362,6 +362,34 @@ class TestScoreMonumentSlot:
         _, tie2 = h._score_monument_slot(2, tracker, cfg)
         assert tie2 < tie1  # lower power = lower tiebreaker = checked first
 
+    def test_flip_velocity_decays_over_time(self):
+        """Flip velocity decays with time — monument drops from urgent after ~30 min."""
+        h = self._make_handlers()
+        cfg = self._make_config()
+        now = time.time()
+
+        # Recent flip (5 min ago) — should still be urgent
+        tracker = {1: MonumentRecord(
+            slot=1, flip_velocity=3.0, last_flip_time=now - 300,
+        )}
+        tier, _ = h._score_monument_slot(1, tracker, cfg)
+        assert tier == 1  # still urgent
+
+        # Old flip (1 hour ago) — velocity decays well below threshold
+        tracker = {1: MonumentRecord(
+            slot=1, flip_velocity=3.0, last_flip_time=now - 3600,
+        )}
+        tier, _ = h._score_monument_slot(1, tracker, cfg)
+        assert tier == 3  # decayed to default/check
+
+    def test_flip_velocity_no_last_flip_time_no_decay(self):
+        """If last_flip_time is 0, no decay is applied (backwards compat)."""
+        h = self._make_handlers()
+        cfg = self._make_config()
+        tracker = {1: MonumentRecord(slot=1, flip_velocity=3.0, last_flip_time=0.0)}
+        tier, _ = h._score_monument_slot(1, tracker, cfg)
+        assert tier == 1  # uses raw velocity, still urgent
+
 
 # ---------------------------------------------------------------------------
 # BotStats.defeats

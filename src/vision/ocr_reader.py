@@ -477,3 +477,76 @@ def read_monument_popup(png_bytes: bytes) -> OCRMonumentReading:
     )
 
     return reading
+
+
+# ---------------------------------------------------------------------------
+# Hibernation / Dormant screen detection via OCR
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OCRScreenReading:
+    """Result of OCR-based screen check for hibernation/dormant overlays."""
+    screen_type: str = ""       # "hibernation", "dormant_period", or ""
+    timer: str = ""             # raw timer text (e.g. "3:21:05")
+    confidence: float = 0.0
+
+
+def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
+    """Quick OCR scan of the full screen for hibernation/dormant text.
+
+    Looks for keywords like "hibernation" or "cannot attack" and a nearby
+    timer pattern (HH:MM:SS or MM:SS).  Much faster and cheaper than a
+    Vision API call.
+    """
+    reading = OCRScreenReading()
+    try:
+        img_array = np.frombuffer(png_bytes, dtype=np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if image is None:
+            return reading
+
+        # Upscale small images for better OCR accuracy
+        h, w = image.shape[:2]
+        if max(h, w) < 1024:
+            scale = 1024 / max(h, w)
+            image = cv2.resize(image, None, fx=scale, fy=scale,
+                               interpolation=cv2.INTER_CUBIC)
+
+        reader = _get_reader()
+        results = reader.readtext(image)
+
+        detected_type = ""
+        timer_text = ""
+        best_confidence = 0.0
+
+        for bbox, text, conf in results:
+            lower = text.lower().strip()
+
+            # Detect screen type keywords
+            if "hibernat" in lower:
+                detected_type = "hibernation"
+                best_confidence = max(best_confidence, conf)
+            elif "cannot attack" in lower or "dormant" in lower:
+                detected_type = "dormant_period"
+                best_confidence = max(best_confidence, conf)
+
+            # Look for timer pattern (H:MM:SS or MM:SS)
+            timer_match = re.search(r"\d{1,2}:\d{2}:\d{2}", text)
+            if not timer_match:
+                timer_match = re.search(r"\d{1,2}:\d{2}", text)
+            if timer_match:
+                timer_text = timer_match.group(0)
+
+        if detected_type:
+            reading.screen_type = detected_type
+            reading.timer = timer_text
+            reading.confidence = best_confidence
+            logger.info(
+                f"OCR screen check: {detected_type}, timer='{timer_text}', "
+                f"confidence={best_confidence:.2f}"
+            )
+
+    except Exception as e:
+        logger.warning(f"OCR screen check failed: {e}")
+
+    return reading
