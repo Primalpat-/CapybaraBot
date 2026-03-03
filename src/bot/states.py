@@ -806,7 +806,14 @@ class StateHandlers:
         if screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
-            return self._enter_dormant(screen, ctx)
+            # Vision often confuses main_map for dormant_period since both show
+            # the game map.  Verify with OCR — look for "cannot attack" / "dormant"
+            # text which is only present during an actual dormant period.
+            ocr_check = check_screen_ocr(png)
+            if ocr_check.screen_type == "dormant_period":
+                return self._enter_dormant(screen, ctx)
+            ctx.log_action("Vision said dormant but OCR disagrees — treating as main_map")
+            return BotState.OPENING_MINIMAP
         elif screen.screen_type == "daily_popup":
             ctx.log_action("Daily popup detected — dismissing")
             await self._dismiss_daily_popups(ctx, config)
@@ -873,10 +880,16 @@ class StateHandlers:
                 self._minimap_open_attempts = 0
                 self._retries_without_progress = 0
                 return BotState.RECONNECTING
-            elif screen.screen_type in ("hibernation", "dormant_period"):
+            elif screen.screen_type == "hibernation":
                 self._minimap_open_attempts = 0
                 self._retries_without_progress = 0
                 return BotState.INITIALIZING
+            elif screen.screen_type == "dormant_period":
+                ocr_check = check_screen_ocr(png)
+                if ocr_check.screen_type == "dormant_period":
+                    self._minimap_open_attempts = 0
+                    self._retries_without_progress = 0
+                    return BotState.INITIALIZING
 
         # Capture a screenshot to calibrate from (we're on the main map)
         png = await self.capture.capture()
@@ -2035,7 +2048,11 @@ class StateHandlers:
         elif screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
-            return self._enter_dormant(screen, ctx)
+            ocr_check = check_screen_ocr(png)
+            if ocr_check.screen_type == "dormant_period":
+                return self._enter_dormant(screen, ctx)
+            ctx.log_action("Vision said dormant but OCR disagrees — treating as main_map")
+            return BotState.OPENING_MINIMAP
         elif screen.screen_type == "occupy_prompt":
             await self._dismiss_occupy_prompt(png, ctx, config)
             return BotState.INITIALIZING
