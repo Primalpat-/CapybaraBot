@@ -1,135 +1,89 @@
 adb:
-  # Path to adb executable. Use "adb" if it's on your PATH, otherwise set the full path.
-  # Example: "C:/platform-tools/adb.exe"
-  adb_path: "C:/platform-tools/adb.exe"
-  host: "127.0.0.1"
-  port: 5556
-  # BlueStacks default ADB port; adjust if needed
-  connect_timeout: 10
+  adb_path: C:/platform-tools/adb.exe
   command_timeout: 30
+  connect_timeout: 10
+  host: 127.0.0.1
+  port: 5555
   reconnect_attempts: 3
   reconnect_delay: 2.0
-
-screen:
-  width: 1080
-  height: 1920
-
+bot:
+  app_package: com.habby.capybara
+  clear_calibration_on_start: false
+  faction: Star Alliance
+  logged_out_restart_delay: 600
+  max_beatable_defender_power: 0
+  max_consecutive_errors: 5
+  max_defeats_before_skip: 2
+  max_idle_retries: 8
+  max_monuments: 0
+  max_recovery_attempts: 5
+  max_total_errors: 20
+  recovery_interval_seconds: 120
+  stagnation_timeout_seconds: 1800
+  stuck_timeout: 60
+contest:
+  flip_velocity_threshold: 2.0
+  max_duration_seconds: 300
+  poll_interval_seconds: 18
+  power_vulnerability_threshold: 5000
+  recent_flip_seconds: 120
+  stable_seconds: 120
 coordinates:
-  # Minimap button position (top-right area)
-  minimap_button:
-    x: 980
-    y: 180
-
-  # Monument tap positions on minimap (populated during gameplay)
-  # These are relative to the minimap overlay
-  minimap_center:
-    x: 540
-    y: 960
-
-  # Attack/action button on monument popup
   action_button:
     x: 540
     y: 1600
-
-  # Close popup button (X)
-  close_popup:
-    x: 950
-    y: 400
-
-  # Skip battle button
-  skip_battle:
-    x: 540
-    y: 1750
-
-  # Back button area
   back_button:
     x: 100
     y: 100
-
-vision:
-  model: "claude-sonnet-4-20250514"
-  max_tokens: 1024
-  max_image_dimension: 1024
-  temperature: 0.0
-  # Cost tracking
-  input_token_cost_per_million: 3.0
-  output_token_cost_per_million: 15.0
-
-timing:
-  # Base delays in seconds (jitter applied on top)
-  after_tap: 0.8
-  after_swipe: 1.2
-  screen_transition: 2.0
-  minimap_open: 1.5
-  battle_poll_interval: 3.0
-  navigation_poll_interval: 2.0
-  monument_popup_wait: 1.5
-  error_recovery_wait: 3.0
-  # How long to wait when a loading/black screen is detected
-  loading_wait: 5.0
-  # How many times to retry when stuck on a loading screen
-  loading_max_retries: 6
-  # Jitter factor (±percentage)
-  jitter_factor: 0.3
-
-bot:
-  # Our faction name (one of: Star Spirit, Galactic Empire, Interstellar Federation, Star Alliance)
-  # Change this after matchmaking assigns your faction
-  faction: "Star Spirit"
-  # Maximum consecutive errors before stopping
-  max_consecutive_errors: 5
-  # Maximum total errors before stopping
-  max_total_errors: 20
-  # Stuck detection: max time in one state (seconds)
-  stuck_timeout: 60
-  # Max monuments per session (0 = unlimited)
-  max_monuments: 0
-  # Seconds to wait before restarting after logged-out detection (10 min)
-  logged_out_restart_delay: 600
-  # Consecutive retries without progress before going idle to cool down
-  max_idle_retries: 8
-  # Clear all calibrated coordinates on bot startup (useful during testing)
-  clear_calibration_on_start: false
-  # App crash recovery
-  app_package: "com.habby.capybara"  # find with: adb shell pm list packages | grep -i capy
-  # Defender power limit (0 = no limit, skip defenders above this power)
-  max_beatable_defender_power: 0
-  # Consecutive defeats before marking a player unbeatable (allows retry)
-  max_defeats_before_skip: 2
-  # Stagnation detection
-  stagnation_timeout_seconds: 1800  # 30 min without monument progress
-  max_recovery_attempts: 5          # then auto-pause
-  recovery_interval_seconds: 120    # min gap between recovery attempts
-
+  close_popup:
+    x: 950
+    y: 400
+  minimap_button:
+    x: 980
+    y: 180
+  minimap_center:
+    x: 540
+    y: 960
+  skip_battle:
+    x: 540
+    y: 1750
 dashboard:
-  host: "0.0.0.0"
-  port: 8080
-  # How many log entries to keep in memory
+  host: 0.0.0.0
   max_log_entries: 500
-
-persistence:
-  save_interval_seconds: 60
-  recheck_interval_seconds: 900     # 15 min — SAFE monument recheck
-  check_recheck_interval_seconds: 600  # 10 min — CHECK monument recheck (when no urgent)
-  post_capture_watch_seconds: 300   # 5 min — monitor after capture
-  well_defended_threshold: 0        # max flipped_to_enemy to be "well-defended"
-
-ocr:
-  enabled: true
-  confidence_threshold: 0.4   # below this, fall back to Vision API
-  debug_save: false            # save cropped regions for tuning
-
-contest:
-  flip_velocity_threshold: 2.0      # flips/hour to trigger contest mode
-  recent_flip_seconds: 120          # flip within this window triggers
-  poll_interval_seconds: 18         # how often to check during contest
-  max_duration_seconds: 300         # max time in contest mode
-  stable_seconds: 120               # exit if friendly this long
-  power_vulnerability_threshold: 5000  # below this power = vulnerable
-
+  port: 8080
 input:
-  # Tap jitter in pixels
-  tap_jitter: 5
-  # Swipe duration range in milliseconds
-  swipe_duration_min: 200
   swipe_duration_max: 400
+  swipe_duration_min: 200
+  tap_jitter: 5
+ocr:
+  confidence_threshold: 0.4
+  debug_save: false
+  enabled: true
+persistence:
+  check_recheck_interval_seconds: 600
+  post_capture_watch_seconds: 300
+  recheck_interval_seconds: 900
+  save_interval_seconds: 60
+  well_defended_threshold: 0
+screen:
+  height: 1600
+  width: 900
+timing:
+  after_swipe: 1.2
+  after_tap: 0.8
+  battle_poll_interval: 3
+  error_recovery_wait: 3.0
+  jitter_factor: 0.3
+  loading_max_retries: 6
+  loading_wait: 5
+  minimap_open: 1.5
+  monument_popup_wait: 1.5
+  navigation_poll_interval: 2.0
+  screen_transition: 2
+vision:
+  input_token_cost_per_million: 3.0
+  max_image_dimension: 1024
+  max_tokens: 1024
+  model: claude-sonnet-4-20250514
+  output_token_cost_per_million: 15.0
+  temperature: 0.0
