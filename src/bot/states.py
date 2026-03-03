@@ -69,6 +69,7 @@ class StateHandlers:
         self._screen_w = config.get("screen", {}).get("width", 1080)
         self._screen_h = config.get("screen", {}).get("height", 1920)
         self._minimap_open_attempts = 0
+        self._monument_tap_attempts = 0
         self._retries_without_progress = 0  # consecutive failures across states
         self._hibernation_seconds: int | None = None  # countdown from last detection
         self._dormant_seconds: int | None = None  # dormant period countdown
@@ -1145,12 +1146,14 @@ class StateHandlers:
     async def handle_approaching_monument(self, ctx: BotContext, config: dict) -> BotState:
         """Tap the monument in the game world to open its popup.
 
-        Uses local ElementDetector instead of Vision to check for the popup.
+        Tries the calibrated position first, then spirals through offsets.
+        Uses local ElementDetector to check for the popup (no Vision API).
         Stuck detection (60s timeout) catches persistent issues like
         hibernation/logged_out — routes through INITIALIZING for one Vision call.
         """
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
+        popup_wait = timing.get("monument_popup_wait", 1.5)
 
         # Wait past any loading screen locally (no Vision)
         png = await self._wait_past_loading_local(ctx, config, "approaching monument")
@@ -1160,28 +1163,62 @@ class StateHandlers:
             popup_els = self.element_detector.detect(png, "monument_popup")
             if any(e.name in ("action_button", "close_popup") for e in popup_els):
                 ctx.log_action("Monument popup already open (detected locally)")
+                self._monument_tap_attempts = 0
                 return BotState.CHECKING_MONUMENT
 
-        # Calibrate world_monument position if needed (first arrival only)
+        # Calibrate world_monument position if needed
         self._calibrate_for_screen(png, "arrived_at_monument", ctx)
 
-        # Tap the calibrated world monument position
-        x, y = self.calibrator.get_pixel("world_monument")
-        ctx.log_action(f"Tapping world monument at ({x}, {y})")
-        await self.input.tap(x, y)
+        base_x, base_y = self.calibrator.get_pixel("world_monument")
 
-        await self._wait(timing.get("monument_popup_wait", 1.5), jitter, "waiting for popup")
+        # Try offset taps — center first, then spiral outward
+        offsets = self._TAP_OFFSETS
+        start_idx = getattr(self, "_monument_tap_attempts", 0)
 
-        # Check locally again after tap
-        png = await self.capture.capture()
-        ctx.last_screenshot = png
-        if self.element_detector is not None:
-            popup_els = self.element_detector.detect(png, "monument_popup")
-            if any(e.name in ("action_button", "close_popup") for e in popup_els):
-                ctx.log_action("Monument popup opened (detected locally)")
-                return BotState.CHECKING_MONUMENT
+        for i in range(start_idx, min(start_idx + 3, len(offsets))):
+            dx, dy = offsets[i]
+            tx = max(0, min(self._screen_w, base_x + dx))
+            ty = max(0, min(self._screen_h, base_y + dy))
 
-        ctx.log_action("Popup not detected locally, retrying tap...")
+            if i == 0:
+                ctx.log_action(f"Tapping world monument at ({tx}, {ty})")
+            else:
+                ctx.log_action(
+                    f"Monument tap offset ({dx:+d}, {dy:+d}) → ({tx}, {ty})"
+                )
+
+            await self.input.tap(tx, ty)
+            await self._wait(popup_wait, jitter, "waiting for popup")
+
+            check_png = await self.capture.capture()
+            ctx.last_screenshot = check_png
+            if self.element_detector is not None:
+                popup_els = self.element_detector.detect(check_png, "monument_popup")
+                if any(e.name in ("action_button", "close_popup") for e in popup_els):
+                    if i > 0:
+                        # Offset worked — update calibration
+                        new_x_pct = tx / self._screen_w * 100
+                        new_y_pct = ty / self._screen_h * 100
+                        ctx.log_action(
+                            f"Offset tap succeeded — updating world_monument: "
+                            f"({new_x_pct:.1f}%, {new_y_pct:.1f}%)"
+                        )
+                        self.calibrator.store("world_monument", new_x_pct, new_y_pct, 1.0)
+                        self.calibrator.save()
+                    ctx.log_action("Monument popup opened (detected locally)")
+                    self._monument_tap_attempts = 0
+                    return BotState.CHECKING_MONUMENT
+
+            self._monument_tap_attempts = i + 1
+
+        # All offsets in this batch failed — invalidate and re-calibrate next time
+        if self._monument_tap_attempts >= len(offsets):
+            ctx.log_action("All monument tap offsets exhausted — invalidating calibration")
+            self.calibrator.invalidate("world_monument")
+            self._monument_tap_attempts = 0
+        else:
+            ctx.log_action("Popup not detected, trying more offsets...")
+
         return BotState.APPROACHING_MONUMENT
 
     async def handle_checking_monument(self, ctx: BotContext, config: dict) -> BotState:
