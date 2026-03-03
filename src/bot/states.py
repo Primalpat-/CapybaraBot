@@ -707,6 +707,19 @@ class StateHandlers:
         else:
             ctx.log_action(f"Could not calibrate any elements for {screen_type}")
 
+    def _popup_detected_locally(self, png_bytes: bytes) -> bool:
+        """Check if a monument popup is open using local element detection.
+
+        Requires BOTH action_button AND close_popup to be found.  Checking
+        for just one causes false positives — the main map's bottom nav
+        (Mining, Shop, etc.) has yellow buttons that match action_button.
+        """
+        if self.element_detector is None:
+            return False
+        popup_els = self.element_detector.detect(png_bytes, "monument_popup")
+        names = {e.name for e in popup_els}
+        return "action_button" in names and "close_popup" in names
+
     @staticmethod
     def _is_loading_screen(png_bytes: bytes, threshold: float = 18.0) -> bool:
         """Check if a screenshot is a loading/black screen using pixel brightness.
@@ -1198,13 +1211,11 @@ class StateHandlers:
         # Wait past any loading screen locally (no Vision)
         png = await self._wait_past_loading_local(ctx, config, "approaching monument")
 
-        # Check locally if monument popup is already open
-        if self.element_detector is not None:
-            popup_els = self.element_detector.detect(png, "monument_popup")
-            if any(e.name in ("action_button", "close_popup") for e in popup_els):
-                ctx.log_action("Monument popup already open (detected locally)")
-                self._monument_tap_attempts = 0
-                return BotState.CHECKING_MONUMENT
+        # Check locally if monument popup is already open (require both buttons)
+        if self._popup_detected_locally(png):
+            ctx.log_action("Monument popup already open (detected locally)")
+            self._monument_tap_attempts = 0
+            return BotState.CHECKING_MONUMENT
 
         # Calibrate world_monument position if needed
         self._calibrate_for_screen(png, "arrived_at_monument", ctx)
@@ -1232,22 +1243,20 @@ class StateHandlers:
 
             check_png = await self.capture.capture()
             ctx.last_screenshot = check_png
-            if self.element_detector is not None:
-                popup_els = self.element_detector.detect(check_png, "monument_popup")
-                if any(e.name in ("action_button", "close_popup") for e in popup_els):
-                    if i > 0:
-                        # Offset worked — update calibration
-                        new_x_pct = tx / self._screen_w * 100
-                        new_y_pct = ty / self._screen_h * 100
-                        ctx.log_action(
-                            f"Offset tap succeeded — updating world_monument: "
-                            f"({new_x_pct:.1f}%, {new_y_pct:.1f}%)"
-                        )
-                        self.calibrator.store("world_monument", new_x_pct, new_y_pct, 1.0)
-                        self.calibrator.save()
-                    ctx.log_action("Monument popup opened (detected locally)")
-                    self._monument_tap_attempts = 0
-                    return BotState.CHECKING_MONUMENT
+            if self._popup_detected_locally(check_png):
+                if i > 0:
+                    # Offset worked — update calibration
+                    new_x_pct = tx / self._screen_w * 100
+                    new_y_pct = ty / self._screen_h * 100
+                    ctx.log_action(
+                        f"Offset tap succeeded — updating world_monument: "
+                        f"({new_x_pct:.1f}%, {new_y_pct:.1f}%)"
+                    )
+                    self.calibrator.store("world_monument", new_x_pct, new_y_pct, 1.0)
+                    self.calibrator.save()
+                ctx.log_action("Monument popup opened (detected locally)")
+                self._monument_tap_attempts = 0
+                return BotState.CHECKING_MONUMENT
 
             self._monument_tap_attempts = i + 1
 
@@ -1518,13 +1527,8 @@ class StateHandlers:
                 self._battle_result_png = None
                 return BotState.INITIALIZING
 
-        # Check locally for monument popup (action button or close button)
-        popup_detected = False
-        if self.element_detector is not None:
-            popup_els = self.element_detector.detect(png, "monument_popup")
-            popup_detected = any(
-                e.name in ("action_button", "close_popup") for e in popup_els
-            )
+        # Check locally for monument popup (require both action + close buttons)
+        popup_detected = self._popup_detected_locally(png)
 
         if not popup_detected:
             # Popup not visible — tap the monument to reopen it
