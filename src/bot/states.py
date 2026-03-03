@@ -1340,8 +1340,11 @@ class StateHandlers:
         timing = config.get("timing", {})
         jitter = timing.get("jitter_factor", 0.3)
 
-        # Wait past any loading screen locally before calibrating
-        png = await self._wait_past_loading_local(ctx, config, "battle start")
+        # Capture screenshot directly — do NOT use _wait_past_loading_local here.
+        # The battle animation screen is intentionally dark (mean brightness < 18)
+        # and would be mistaken for a loading screen, delaying skip by 30+ seconds.
+        png = await self.capture.capture()
+        ctx.last_screenshot = png
 
         # Calibrate skip button if needed
         if self.calibrator.needs_calibration("battle_active"):
