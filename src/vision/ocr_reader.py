@@ -30,7 +30,7 @@ def _get_reader():
     if _reader is None:
         import easyocr
         logger.info("Loading EasyOCR model (first call)...")
-        _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        _reader = easyocr.Reader(["en", "ch_sim"], gpu=False, verbose=False)
         logger.info("EasyOCR model loaded")
     return _reader
 
@@ -77,6 +77,19 @@ def _crop_region(image: np.ndarray, region: tuple[float, float, float, float]) -
     right = int(region[2] * w)
     bottom = int(region[3] * h)
     return image[top:bottom, left:right]
+
+
+def _enhance_for_ocr(image: np.ndarray) -> np.ndarray:
+    """Enhance image contrast for better OCR on colored backgrounds.
+
+    Converts to grayscale, applies CLAHE (Contrast Limited Adaptive Histogram
+    Equalization) to boost text contrast against colored badge backgrounds,
+    then converts back to BGR (EasyOCR expects color or gray).
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
 
 def _detect_text_color(image: np.ndarray, bbox) -> str:
@@ -303,10 +316,14 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
 
     popup_h, popup_w = popup.shape[:2]
 
-    # Run OCR on the entire popup at once
+    # Enhance contrast for better OCR on colored badge backgrounds.
+    # Keep the original popup for color detection (ownership text color).
+    popup_enhanced = _enhance_for_ocr(popup)
+
+    # Run OCR on the contrast-enhanced image
     reader = _get_reader()
     try:
-        raw_results = reader.readtext(popup, detail=1)
+        raw_results = reader.readtext(popup_enhanced, detail=1)
     except Exception as e:
         logger.warning(f"OCR failed: {e}")
         return OCRMonumentReading()
@@ -330,9 +347,9 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
             "cx": cx,
         })
 
-    logger.debug(f"OCR found {len(detections)} text regions")
+    logger.info(f"OCR found {len(detections)} text regions in popup")
     for d in detections:
-        logger.debug(f"  [{d['cy']:.2f}, {d['cx']:.2f}] conf={d['conf']:.2f} '{d['text']}'")
+        logger.info(f"  OCR [{d['cy']:.2f}, {d['cx']:.2f}] conf={d['conf']:.2f} '{d['text']}'")
 
     reading = OCRMonumentReading()
     confidences = []
