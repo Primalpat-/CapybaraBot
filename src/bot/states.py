@@ -328,15 +328,15 @@ class StateHandlers:
         return BotState.RECONNECTING
 
     def _enter_dormant(self, screen, ctx: BotContext) -> BotState:
-        """Handle dormant period — parse timer and go idle."""
+        """Handle dormant period — parse timer and go idle.
+
+        Only called when a readable timer has been confirmed by the caller.
+        """
         secs = parse_timer_seconds(screen.timer)
-        self._dormant_seconds = secs
-        if secs is not None:
-            m, s = divmod(secs, 60)
-            h, m = divmod(m, 60)
-            ctx.log_action(f"Dormant period — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
-        else:
-            ctx.log_action("Dormant period — could not read timer, will recheck in 60s")
+        self._dormant_seconds = secs if secs and secs > 0 else 60
+        m, s = divmod(self._dormant_seconds, 60)
+        h, m = divmod(m, 60)
+        ctx.log_action(f"Dormant period — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
         if self._event_logger:
             self._event_logger.log("dormant_start", duration=secs)
         return BotState.IDLE
@@ -806,13 +806,14 @@ class StateHandlers:
         if screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
-            # Vision often confuses main_map for dormant_period since both show
-            # the game map.  Verify with OCR — look for "cannot attack" / "dormant"
-            # text which is only present during an actual dormant period.
-            ocr_check = check_screen_ocr(png)
-            if ocr_check.screen_type == "dormant_period":
+            # The game map always shows a "Dormant Period" sidebar icon, so both
+            # Vision and OCR can be fooled.  The real dormant debuff is a popup
+            # at the bottom with red text AND a countdown timer.  Require a
+            # readable timer to confirm — no timer means the game is active.
+            timer_secs = parse_timer_seconds(screen.timer) if screen.timer else None
+            if timer_secs and timer_secs > 0:
                 return self._enter_dormant(screen, ctx)
-            ctx.log_action("Vision said dormant but OCR disagrees — treating as main_map")
+            ctx.log_action("Dormant detected but no timer — game is active, proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "daily_popup":
             ctx.log_action("Daily popup detected — dismissing")
@@ -885,8 +886,8 @@ class StateHandlers:
                 self._retries_without_progress = 0
                 return BotState.INITIALIZING
             elif screen.screen_type == "dormant_period":
-                ocr_check = check_screen_ocr(png)
-                if ocr_check.screen_type == "dormant_period":
+                timer_secs = parse_timer_seconds(screen.timer) if screen.timer else None
+                if timer_secs and timer_secs > 0:
                     self._minimap_open_attempts = 0
                     self._retries_without_progress = 0
                     return BotState.INITIALIZING
@@ -1945,9 +1946,7 @@ class StateHandlers:
                 if self._event_logger:
                     self._event_logger.log("dormant_start", duration=secs, source="ocr")
                 return BotState.IDLE
-            else:
-                ctx.log_action("OCR detected dormant but timer unreadable — using Vision")
-                return BotState.INITIALIZING
+            # No timer = sidebar icon false positive, not an actual debuff
 
         # Check locally whether the minimap is still open — no Vision needed
         detection = find_minimap_squares(png)
@@ -2048,10 +2047,10 @@ class StateHandlers:
         elif screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
-            ocr_check = check_screen_ocr(png)
-            if ocr_check.screen_type == "dormant_period":
+            timer_secs = parse_timer_seconds(screen.timer) if screen.timer else None
+            if timer_secs and timer_secs > 0:
                 return self._enter_dormant(screen, ctx)
-            ctx.log_action("Vision said dormant but OCR disagrees — treating as main_map")
+            ctx.log_action("Dormant detected but no timer — game is active, proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "occupy_prompt":
             await self._dismiss_occupy_prompt(png, ctx, config)
