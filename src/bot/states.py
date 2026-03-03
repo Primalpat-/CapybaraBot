@@ -1410,13 +1410,20 @@ class StateHandlers:
             skip_found = any(e.name == "skip_battle" for e in battle_elements)
             ok_found = any(e.name == "ok_button" for e in result_elements)
 
-        if skip_found or ok_found:
+        if ok_found:
+            # Battle already finished — tap OK immediately, don't send to
+            # SKIPPING_BATTLE where the result screen may auto-dismiss.
             ctx.stats.battles_fought += 1
             self._skip_battle_no_ui_count = 0
-            if ok_found:
-                ctx.log_action("Battle already finished (detected OK button locally)")
-            else:
-                ctx.log_action("Battle started (detected skip button locally)")
+            ctx.log_action("Battle already finished (detected OK button locally)")
+            self._battle_result_png = png
+            await self._tap_ok_button(png, ctx, config)
+            return BotState.POST_BATTLE
+
+        if skip_found:
+            ctx.stats.battles_fought += 1
+            self._skip_battle_no_ui_count = 0
+            ctx.log_action("Battle started (detected skip button locally)")
             return BotState.SKIPPING_BATTLE
 
         # Neither button found — retry once after a short wait (battle may still load)
@@ -1431,12 +1438,16 @@ class StateHandlers:
             skip_found = any(e.name == "skip_battle" for e in battle_elements)
             ok_found = any(e.name == "ok_button" for e in result_elements)
 
-        if skip_found or ok_found:
+        if ok_found:
             ctx.stats.battles_fought += 1
-            if ok_found:
-                ctx.log_action("Battle detected on retry (OK button)")
-            else:
-                ctx.log_action("Battle detected on retry (skip button)")
+            ctx.log_action("Battle detected on retry (OK button)")
+            self._battle_result_png = png
+            await self._tap_ok_button(png, ctx, config)
+            return BotState.POST_BATTLE
+
+        if skip_found:
+            ctx.stats.battles_fought += 1
+            ctx.log_action("Battle detected on retry (skip button)")
             return BotState.SKIPPING_BATTLE
 
         # Still nothing — popup was likely stale
@@ -1505,7 +1516,7 @@ class StateHandlers:
         if self._skip_battle_no_ui_count >= 4:
             self._skip_battle_no_ui_count = 0
             ctx.log_action("Battle UI not found after multiple attempts — using Vision to identify screen")
-            _, screen = await self._identify_screen(png, ctx, config)
+            _, screen = await self._wait_past_loading(ctx, config, "battle fallback")
             ctx.log_action(f"Vision says: {screen.screen_type} (conf={screen.confidence:.2f})")
 
             if screen.screen_type == "battle_result":
