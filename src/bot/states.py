@@ -826,18 +826,18 @@ class StateHandlers:
 
         if screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
-        elif screen.screen_type == "dormant_period":
-            # The sidebar always shows a "Dormant Period" icon, and the skull
-            # timer in the top-left is NOT the dormant timer.  Use OCR to
-            # look for "cannot attack" text in the bottom half — that's the
-            # real debuff popup.
+        elif screen.screen_type in ("dormant_period", "main_map"):
+            # Always OCR-check for the "Cannot attack" dormant debuff banner
+            # at the bottom of the screen.  Vision often classifies this as
+            # "main_map" because the 3D world is still visible underneath.
             ocr_check = check_screen_ocr(png)
             if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
                 secs = parse_timer_seconds(ocr_check.timer)
                 if secs and secs > 0:
-                    screen.timer = ocr_check.timer  # use OCR's bottom-half timer
+                    screen.timer = ocr_check.timer
                     return self._enter_dormant(screen, ctx)
-            ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
+            if screen.screen_type == "dormant_period":
+                ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "daily_popup":
             ctx.log_action("Daily popup detected — dismissing")
@@ -909,7 +909,7 @@ class StateHandlers:
                 self._minimap_open_attempts = 0
                 self._retries_without_progress = 0
                 return BotState.INITIALIZING
-            elif screen.screen_type == "dormant_period":
+            elif screen.screen_type in ("dormant_period", "main_map"):
                 ocr_check = check_screen_ocr(png)
                 if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
                     secs = parse_timer_seconds(ocr_check.timer)
@@ -2122,7 +2122,16 @@ class StateHandlers:
             return BotState.RECONNECTING
         elif screen.screen_type == "minimap":
             return BotState.READING_MINIMAP
-        elif screen.screen_type == "main_map":
+        elif screen.screen_type in ("main_map", "dormant_period"):
+            # Check for dormant debuff ("Cannot attack" banner at bottom)
+            ocr_check = check_screen_ocr(png)
+            if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
+                secs = parse_timer_seconds(ocr_check.timer)
+                if secs and secs > 0:
+                    screen.timer = ocr_check.timer
+                    return self._enter_dormant(screen, ctx)
+            if screen.screen_type == "dormant_period":
+                ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "monument_popup":
             return BotState.CHECKING_MONUMENT
@@ -2133,15 +2142,6 @@ class StateHandlers:
             return BotState.POST_BATTLE
         elif screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
-        elif screen.screen_type == "dormant_period":
-            ocr_check = check_screen_ocr(png)
-            if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
-                secs = parse_timer_seconds(ocr_check.timer)
-                if secs and secs > 0:
-                    screen.timer = ocr_check.timer
-                    return self._enter_dormant(screen, ctx)
-            ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
-            return BotState.OPENING_MINIMAP
         elif screen.screen_type == "occupy_prompt":
             await self._dismiss_occupy_prompt(png, ctx, config)
             return BotState.INITIALIZING
