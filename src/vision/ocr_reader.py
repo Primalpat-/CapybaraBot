@@ -200,9 +200,48 @@ _NOISE_WORDS = {
     "defense", "info", "estimated", "earnings", "hour", "level", "monument",
     "subject", "actual", "output", "ownership", "guard", "guarding",
     "not", "garrisoned", "empty",
+    # Game-specific UI text that appears in the defender section
+    "win", "streak", "cannot", "garrison", "cooldown", "debuff",
+    "buff", "timer", "expires", "remaining", "locked", "occupied",
     # Faction names — these appear in the ownership section, not defender section
     "star", "spirit", "galactic", "empire", "interstellar", "federation", "alliance",
 }
+
+# Regex for timer patterns — these are never player names
+_TIMER_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+
+# Regex for "X Win Streak" pattern
+_WIN_STREAK_RE = re.compile(r"\d+\s*win\s*streak", re.IGNORECASE)
+
+
+def _is_noise_text(text: str) -> bool:
+    """Check if text is game UI noise (not a player name).
+
+    Filters out: known noise/button words, timer patterns, win streak text,
+    power values, and pure numbers.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    # Timer patterns (e.g. "01:23:45", "5:30")
+    if _TIMER_RE.match(stripped):
+        return True
+    # "X Win Streak" pattern
+    if _WIN_STREAK_RE.search(stripped):
+        return True
+    # Power text (has K/M/B/T suffix)
+    if _is_power_text(stripped):
+        return True
+    # Pure digits / digit-only with punctuation (e.g. "123", "1,234")
+    if not any(c.isalpha() for c in stripped):
+        return True
+    # Known noise or button words
+    words = set(stripped.lower().split())
+    if words & _NOISE_WORDS:
+        return True
+    if words & _BUTTON_WORDS:
+        return True
+    return False
 
 
 def _is_name_text(text: str) -> bool:
@@ -213,12 +252,7 @@ def _is_name_text(text: str) -> bool:
     alpha_count = sum(1 for c in text if c.isalpha())
     if alpha_count < 2:
         return False
-    if _is_power_text(text):
-        return False
-    words = set(text.lower().split())
-    if words & _NOISE_WORDS:
-        return False
-    if words & _BUTTON_WORDS:
+    if _is_noise_text(text):
         return False
     return True
 
@@ -315,12 +349,17 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
             ownership_info_y = d["cy"]
 
     # --- Find defenders (between Defense Info and Ownership Info) ---
-    # Powers always have K/M/B/T suffix; names are the only alpha text
+    # Power numbers (K/M/B/T suffix) are the most reliable anchor for each
+    # defender slot.  For each power entry we look in a tight spatial window
+    # ABOVE it for the player name, which filters out noise text like
+    # "Win Streak", "Cannot garrison", debuff timers, etc.
+    defender_detections = [
+        d for d in detections
+        if d["cy"] > defense_info_y and d["cy"] < ownership_info_y
+    ]
+
     power_entries = []
-    name_entries = []
-    for d in detections:
-        if d["cy"] <= defense_info_y or d["cy"] >= ownership_info_y:
-            continue
+    for d in defender_detections:
         if _is_power_text(d["text"]):
             power = _extract_power_number(d["text"])
             if power > 0:
@@ -331,38 +370,40 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
                     "conf": d["conf"],
                     "text": d["text"],
                 })
-        elif _is_name_text(d["text"]):
-            name_entries.append({
-                "name": _clean_name(d["text"]),
-                "cy": d["cy"],
-                "conf": d["conf"],
-            })
 
     # Sort power entries by vertical position (top to bottom = slot 1, 2, 3)
     power_entries.sort(key=lambda p: p["cy"])
 
-    # Pair each power entry with the closest name by y-position
-    used_names = set()
+    # For each power entry, search a tight window ABOVE it for the name.
+    # Player names appear directly above their power number within ~6% of
+    # popup height.  Accept any non-noise text as a potential name — players
+    # can have unicode symbols, special chars, etc.
+    used_detections = set()  # indices into defender_detections
     defenders = []
     for slot_idx, pe in enumerate(power_entries[:3]):  # max 3 defenders
         slot_num = slot_idx + 1
         best_name = ""
         best_conf = 0.0
         best_dist = 999.0
-        best_idx = -1
+        best_didx = -1
 
-        for i, ne in enumerate(name_entries):
-            if i in used_names:
+        for di, d in enumerate(defender_detections):
+            if di in used_detections:
                 continue
-            dy = abs(ne["cy"] - pe["cy"])
-            if dy < 0.08 and dy < best_dist:
-                best_name = ne["name"]
-                best_conf = ne["conf"]
+            # Name must be ABOVE the power entry (lower cy) and close
+            dy = pe["cy"] - d["cy"]  # positive = d is above pe
+            if dy < 0.005 or dy > 0.06:
+                continue
+            if _is_noise_text(d["text"]):
+                continue
+            if dy < best_dist:
+                best_name = _clean_name(d["text"])
+                best_conf = d["conf"]
                 best_dist = dy
-                best_idx = i
+                best_didx = di
 
-        if best_idx >= 0:
-            used_names.add(best_idx)
+        if best_didx >= 0:
+            used_detections.add(best_didx)
 
         defender = OCRDefenderReading(
             slot=slot_num,

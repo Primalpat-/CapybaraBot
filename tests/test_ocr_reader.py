@@ -9,6 +9,7 @@ from src.vision.ocr_reader import (
     _detect_text_color,
     _extract_power_number,
     _is_name_text,
+    _is_noise_text,
     _is_power_text,
     OCRMonumentReading,
     OCRDefenderReading,
@@ -143,8 +144,55 @@ class TestIsPowerText:
         assert _is_power_text("450/hour") is False
 
 
+class TestIsNoiseText:
+    """Noise text filtering — game UI text that is NOT a player name."""
+
+    def test_timer_patterns(self):
+        assert _is_noise_text("01:23:45") is True
+        assert _is_noise_text("5:30") is True
+        assert _is_noise_text("0:45:12") is True
+
+    def test_win_streak(self):
+        assert _is_noise_text("5 Win Streak") is True
+        assert _is_noise_text("12 win streak") is True
+        assert _is_noise_text("3Win Streak") is True
+
+    def test_cannot_garrison(self):
+        assert _is_noise_text("Cannot garrison") is True
+        assert _is_noise_text("garrison") is True
+
+    def test_debuff_cooldown(self):
+        assert _is_noise_text("cooldown") is True
+        assert _is_noise_text("debuff") is True
+
+    def test_known_noise_words(self):
+        assert _is_noise_text("Defense Info") is True
+        assert _is_noise_text("estimated") is True
+        assert _is_noise_text("Not Garrisoned") is True
+
+    def test_power_text(self):
+        assert _is_noise_text("24.68M") is True
+        assert _is_noise_text("39.29K") is True
+
+    def test_pure_numbers(self):
+        assert _is_noise_text("123") is True
+        assert _is_noise_text("1,234") is True
+
+    def test_button_words(self):
+        assert _is_noise_text("attack") is True
+        assert _is_noise_text("Exit") is True
+
+    def test_player_name_not_noise(self):
+        assert _is_noise_text("Primalpat") is False
+        assert _is_noise_text("Lonz") is False
+
+    def test_empty_is_noise(self):
+        assert _is_noise_text("") is True
+        assert _is_noise_text("  ") is True
+
+
 class TestIsNameText:
-    """Player names: 2+ alpha chars, not power/noise/button text."""
+    """Player names: 2+ alpha chars, not noise text."""
 
     def test_player_name(self):
         assert _is_name_text("Primalpat") is True
@@ -181,6 +229,17 @@ class TestIsNameText:
         assert _is_name_text("Galactic Empire") is False
         assert _is_name_text("Interstellar Federation") is False
         assert _is_name_text("Star Alliance") is False
+
+    def test_win_streak_not_name(self):
+        assert _is_name_text("5 Win Streak") is False
+        assert _is_name_text("12 win streak") is False
+
+    def test_timer_not_name(self):
+        assert _is_name_text("01:23:45") is False
+        assert _is_name_text("5:30") is False
+
+    def test_cannot_garrison_not_name(self):
+        assert _is_name_text("Cannot garrison") is False
 
 
 class TestCleanName:
