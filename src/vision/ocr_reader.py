@@ -522,6 +522,11 @@ def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
     Looks for keywords like "hibernation" or "cannot attack" and a nearby
     timer pattern (HH:MM:SS or MM:SS).  Much faster and cheaper than a
     Vision API call.
+
+    Dormant detection requires "cannot attack" text (NOT "dormant" alone,
+    because the sidebar always shows a "Dormant Period" icon).  The dormant
+    debuff popup appears at the bottom-middle of the screen, so both the
+    keyword and timer must be in the bottom half (y > 50%).
     """
     reading = OCRScreenReading()
     try:
@@ -536,6 +541,7 @@ def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
             scale = 1024 / max(h, w)
             image = cv2.resize(image, None, fx=scale, fy=scale,
                                interpolation=cv2.INTER_CUBIC)
+            h, w = image.shape[:2]
 
         reader = _get_reader()
         results = reader.readtext(image)
@@ -546,12 +552,16 @@ def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
 
         for bbox, text, conf in results:
             lower = text.lower().strip()
+            cy = _center_y(bbox)
+            in_bottom_half = cy > h * 0.5
 
             # Detect screen type keywords
             if "hibernat" in lower:
                 detected_type = "hibernation"
                 best_confidence = max(best_confidence, conf)
-            elif "cannot attack" in lower or "dormant" in lower:
+            elif "cannot attack" in lower and in_bottom_half:
+                # Only match the actual debuff popup at the bottom, not the
+                # "Dormant Period" sidebar icon which is always visible.
                 detected_type = "dormant_period"
                 best_confidence = max(best_confidence, conf)
 
@@ -560,7 +570,10 @@ def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
             if not timer_match:
                 timer_match = re.search(r"\d{1,2}:\d{2}", text)
             if timer_match:
-                timer_text = timer_match.group(0)
+                # For dormant, only accept timers in bottom half of screen.
+                # The skull timer in the top-left is NOT the dormant timer.
+                if detected_type != "dormant_period" or in_bottom_half:
+                    timer_text = timer_match.group(0)
 
         if detected_type:
             reading.screen_type = detected_type

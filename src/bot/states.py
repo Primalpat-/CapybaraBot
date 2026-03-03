@@ -69,6 +69,7 @@ class StateHandlers:
         self._screen_w = config.get("screen", {}).get("width", 1080)
         self._screen_h = config.get("screen", {}).get("height", 1920)
         self._minimap_open_attempts = 0
+        self._minimap_tap_offset_idx = 0
         self._monument_tap_attempts = 0
         self._retries_without_progress = 0  # consecutive failures across states
         self._hibernation_seconds: int | None = None  # countdown from last detection
@@ -807,14 +808,17 @@ class StateHandlers:
         if screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
-            # The game map always shows a "Dormant Period" sidebar icon, so both
-            # Vision and OCR can be fooled.  The real dormant debuff is a popup
-            # at the bottom with red text AND a countdown timer.  Require a
-            # readable timer to confirm — no timer means the game is active.
-            timer_secs = parse_timer_seconds(screen.timer) if screen.timer else None
-            if timer_secs and timer_secs > 0:
-                return self._enter_dormant(screen, ctx)
-            ctx.log_action("Dormant detected but no timer — game is active, proceeding")
+            # The sidebar always shows a "Dormant Period" icon, and the skull
+            # timer in the top-left is NOT the dormant timer.  Use OCR to
+            # look for "cannot attack" text in the bottom half — that's the
+            # real debuff popup.
+            ocr_check = check_screen_ocr(png)
+            if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
+                secs = parse_timer_seconds(ocr_check.timer)
+                if secs and secs > 0:
+                    screen.timer = ocr_check.timer  # use OCR's bottom-half timer
+                    return self._enter_dormant(screen, ctx)
+            ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "daily_popup":
             ctx.log_action("Daily popup detected — dismissing")
@@ -887,11 +891,13 @@ class StateHandlers:
                 self._retries_without_progress = 0
                 return BotState.INITIALIZING
             elif screen.screen_type == "dormant_period":
-                timer_secs = parse_timer_seconds(screen.timer) if screen.timer else None
-                if timer_secs and timer_secs > 0:
-                    self._minimap_open_attempts = 0
-                    self._retries_without_progress = 0
-                    return BotState.INITIALIZING
+                ocr_check = check_screen_ocr(png)
+                if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
+                    secs = parse_timer_seconds(ocr_check.timer)
+                    if secs and secs > 0:
+                        self._minimap_open_attempts = 0
+                        self._retries_without_progress = 0
+                        return BotState.INITIALIZING
 
         # Capture a screenshot to calibrate from (we're on the main map)
         png = await self.capture.capture()
@@ -904,29 +910,63 @@ class StateHandlers:
             ctx.log_action("Could not find minimap_button — retrying")
             return BotState.OPENING_MINIMAP
 
-        # Single tap — no offset loop (minimap is an overlay)
-        bx, by = self.calibrator.get_pixel("minimap_button")
-        ctx.log_action(f"Tapping minimap_button at ({bx}, {by})")
-        await self.input.tap(bx, by)
-        await self._wait(tap_wait, jitter, "minimap open")
+        base_x, base_y = self.calibrator.get_pixel("minimap_button")
 
-        # Capture after tap and wait past any loading
-        check_png = await self.capture.capture()
-        ctx.last_screenshot = check_png
-        if self._is_loading_screen(check_png):
-            check_png = await self._wait_past_loading_local(
-                ctx, config, "minimap open"
-            )
+        # Try offset taps — center first, then spiral outward.
+        # Offsets are safe here because the minimap hasn't opened yet.
+        offsets = self._TAP_OFFSETS
+        start_idx = getattr(self, "_minimap_tap_offset_idx", 0)
 
-        # Verify locally: can we see the minimap's colored squares?
-        detection = find_minimap_squares(check_png)
-        if detection and len(detection.squares) >= 2:
-            ctx.log_action(f"Minimap opened — detected {len(detection.squares)} squares locally")
-            self._minimap_open_attempts = 0
-            return BotState.READING_MINIMAP
+        for i in range(start_idx, min(start_idx + 2, len(offsets))):
+            dx, dy = offsets[i]
+            tx = max(0, min(self._screen_w, base_x + dx))
+            ty = max(0, min(self._screen_h, base_y + dy))
 
-        # Local detection didn't find squares — retry without Vision
-        ctx.log_action("Minimap not detected after tap, retrying...")
+            if i == 0:
+                ctx.log_action(f"Tapping minimap_button at ({tx}, {ty})")
+            else:
+                ctx.log_action(
+                    f"Minimap tap offset ({dx:+d}, {dy:+d}) → ({tx}, {ty})"
+                )
+
+            await self.input.tap(tx, ty)
+            await self._wait(tap_wait, jitter, "minimap open")
+
+            # Capture after tap and wait past any loading
+            check_png = await self.capture.capture()
+            ctx.last_screenshot = check_png
+            if self._is_loading_screen(check_png):
+                check_png = await self._wait_past_loading_local(
+                    ctx, config, "minimap open"
+                )
+
+            # Verify locally: can we see the minimap's colored squares?
+            detection = find_minimap_squares(check_png)
+            if detection and len(detection.squares) >= 2:
+                if i > 0:
+                    new_x_pct = tx / self._screen_w * 100
+                    new_y_pct = ty / self._screen_h * 100
+                    ctx.log_action(
+                        f"Offset tap succeeded — updating minimap_button: "
+                        f"({new_x_pct:.1f}%, {new_y_pct:.1f}%)"
+                    )
+                    self.calibrator.store("minimap_button", new_x_pct, new_y_pct, 1.0)
+                    self.calibrator.save()
+                ctx.log_action(f"Minimap opened — detected {len(detection.squares)} squares locally")
+                self._minimap_open_attempts = 0
+                self._minimap_tap_offset_idx = 0
+                return BotState.READING_MINIMAP
+
+            self._minimap_tap_offset_idx = i + 1
+
+        # All offsets in this batch failed
+        if self._minimap_tap_offset_idx >= len(offsets):
+            ctx.log_action("All minimap tap offsets exhausted — invalidating calibration")
+            self.calibrator.invalidate("minimap_button")
+            self._minimap_tap_offset_idx = 0
+        else:
+            ctx.log_action("Minimap not detected after tap, trying more offsets...")
+
         return BotState.OPENING_MINIMAP
 
     def _score_monument_slot(self, slot: int, tracker, config: dict) -> tuple[int, float]:
@@ -2084,10 +2124,13 @@ class StateHandlers:
         elif screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
         elif screen.screen_type == "dormant_period":
-            timer_secs = parse_timer_seconds(screen.timer) if screen.timer else None
-            if timer_secs and timer_secs > 0:
-                return self._enter_dormant(screen, ctx)
-            ctx.log_action("Dormant detected but no timer — game is active, proceeding")
+            ocr_check = check_screen_ocr(png)
+            if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
+                secs = parse_timer_seconds(ocr_check.timer)
+                if secs and secs > 0:
+                    screen.timer = ocr_check.timer
+                    return self._enter_dormant(screen, ctx)
+            ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "occupy_prompt":
             await self._dismiss_occupy_prompt(png, ctx, config)
