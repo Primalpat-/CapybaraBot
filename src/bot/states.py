@@ -1233,11 +1233,16 @@ class StateHandlers:
             return BotState.OPENING_MINIMAP
 
         if info.all_defenders_defeated:
-            ctx.log_action("All defenders already defeated")
-            if info.action_button.visible:
-                await self.actions.tap_action_button()
-            await self.actions.close_popup()
-            return BotState.OPENING_MINIMAP
+            # If the button is Attack, a battle will still start — use the normal
+            # ATTACKING flow so we wait for it and tap skip/OK properly.
+            if info.action_button.visible and info.action_button.action_type in ("attack", "unknown"):
+                ctx.log_action("All defenders defeated but Attack available — attacking")
+            else:
+                ctx.log_action("All defenders already defeated")
+                if info.action_button.visible:
+                    await self.actions.tap_action_button()
+                await self.actions.close_popup()
+                return BotState.OPENING_MINIMAP
 
         if info.action_button.visible and info.action_button.action_type in ("attack", "unknown"):
             # Check if the next active defender is someone we can't beat
