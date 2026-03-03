@@ -30,7 +30,7 @@ def _get_reader():
     if _reader is None:
         import easyocr
         logger.info("Loading EasyOCR model (first call)...")
-        _reader = easyocr.Reader(["en", "ch_sim"], gpu=False, verbose=False)
+        _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
         logger.info("EasyOCR model loaded")
     return _reader
 
@@ -80,16 +80,25 @@ def _crop_region(image: np.ndarray, region: tuple[float, float, float, float]) -
 
 
 def _enhance_for_ocr(image: np.ndarray) -> np.ndarray:
-    """Enhance image contrast for better OCR on colored backgrounds.
+    """Upscale and sharpen popup image for better OCR accuracy.
 
-    Converts to grayscale, applies CLAHE (Contrast Limited Adaptive Histogram
-    Equalization) to boost text contrast against colored badge backgrounds,
-    then converts back to BGR (EasyOCR expects color or gray).
+    EasyOCR works better on larger text.  We upscale to at least 1200px
+    wide and apply a mild sharpen to crispen text edges on colored badge
+    backgrounds.  Keeps the original color (no grayscale conversion).
     """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    h, w = image.shape[:2]
+    min_width = 1200
+    if w < min_width:
+        scale = min_width / w
+        image = cv2.resize(image, None, fx=scale, fy=scale,
+                           interpolation=cv2.INTER_CUBIC)
+
+    # Mild sharpen kernel — improves text edges without adding noise
+    sharpen_kernel = np.array([[0, -0.5, 0],
+                               [-0.5, 3, -0.5],
+                               [0, -0.5, 0]], dtype=np.float32)
+    image = cv2.filter2D(image, -1, sharpen_kernel)
+    return image
 
 
 def _detect_text_color(image: np.ndarray, bbox) -> str:
@@ -316,11 +325,14 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
 
     popup_h, popup_w = popup.shape[:2]
 
-    # Enhance contrast for better OCR on colored badge backgrounds.
+    # Upscale + sharpen for better OCR accuracy.
     # Keep the original popup for color detection (ownership text color).
     popup_enhanced = _enhance_for_ocr(popup)
+    enh_h, enh_w = popup_enhanced.shape[:2]
+    scale_x = popup_w / enh_w  # to map enhanced coords back to original
+    scale_y = popup_h / enh_h
 
-    # Run OCR on the contrast-enhanced image
+    # Run OCR on the enhanced image
     reader = _get_reader()
     try:
         raw_results = reader.readtext(popup_enhanced, detail=1)
@@ -332,15 +344,21 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
         return OCRMonumentReading()
 
     # Build list of (bbox, text, confidence, y_center_pct, x_center_pct)
+    # Bbox coords are in enhanced image space; convert to fractions using
+    # enhanced dimensions, and scale bbox back for color detection on original.
     detections = []
     for bbox, text, conf in raw_results:
         text = text.strip()
         if not text:
             continue
-        cy = _center_y(bbox) / popup_h  # as fraction of popup height
-        cx = _center_x(bbox) / popup_w  # as fraction of popup width
+        cy = _center_y(bbox) / enh_h  # as fraction of popup height
+        cx = _center_x(bbox) / enh_w  # as fraction of popup width
+        # Scale bbox back to original popup coordinates for color detection
+        orig_bbox = [
+            [int(pt[0] * scale_x), int(pt[1] * scale_y)] for pt in bbox
+        ]
         detections.append({
-            "bbox": bbox,
+            "bbox": orig_bbox,
             "text": text,
             "conf": conf,
             "cy": cy,

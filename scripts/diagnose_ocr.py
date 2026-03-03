@@ -26,6 +26,7 @@ from src.adb.capture import ScreenCapture
 from src.vision.ocr_reader import (
     POPUP_REGION,
     _crop_region,
+    _enhance_for_ocr,
     _get_reader,
     _is_power_text,
     read_monument_popup,
@@ -55,12 +56,17 @@ def draw_ocr_results(image: np.ndarray) -> np.ndarray:
     cv2.putText(annotated, "POPUP", (pl + 5, pt + 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    # Crop popup and run raw OCR
+    # Crop popup, enhance, and run raw OCR
     popup = _crop_region(image, POPUP_REGION)
+    popup_enhanced = _enhance_for_ocr(popup)
     reader = _get_reader()
-    results = reader.readtext(popup, detail=1)
+    results = reader.readtext(popup_enhanced, detail=1)
+
+    enh_h, enh_w = popup_enhanced.shape[:2]
+    pop_h, pop_w = popup.shape[:2]
 
     print(f"\nRaw OCR detections ({len(results)} items):")
+    print(f"  Popup: {pop_w}x{pop_h} → Enhanced: {enh_w}x{enh_h}")
     print("-" * 70)
 
     for bbox, text, conf in results:
@@ -68,10 +74,11 @@ def draw_ocr_results(image: np.ndarray) -> np.ndarray:
         if not text:
             continue
 
-        # Convert popup-relative bbox to full image coords
-        pts = np.array(bbox, dtype=np.int32)
-        pts[:, 0] = pts[:, 0] + pl
-        pts[:, 1] = pts[:, 1] + pt
+        # Convert enhanced-image bbox → original popup coords → full image coords
+        pts = np.array(bbox, dtype=np.float32)
+        pts[:, 0] = pts[:, 0] * pop_w / enh_w + pl
+        pts[:, 1] = pts[:, 1] * pop_h / enh_h + pt
+        pts = pts.astype(np.int32)
 
         # Color code: green=power, blue=button keywords, yellow=other
         lower = text.lower()
