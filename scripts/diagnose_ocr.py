@@ -81,7 +81,7 @@ def draw_ocr_results(image: np.ndarray) -> np.ndarray:
         elif any(w in lower for w in ("attack", "exit", "visit", "claim", "quick", "mining")):
             color = (255, 100, 100)
             label = "BTN"
-        elif "ownership" in lower or "star spirit" in lower:
+        elif "ownership" in lower or any(f in lower for f in ("star spirit", "galactic empire", "interstellar federation", "star alliance")):
             color = (255, 0, 255)
             label = "OWN"
         else:

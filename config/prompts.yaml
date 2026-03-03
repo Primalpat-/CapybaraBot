@@ -109,15 +109,16 @@ check_monument:
     - **Monument Ownership** (at the bottom of the popup): This shows who currently owns
       the monument. The monument is friendly ONLY if BOTH conditions are met:
       1. The text is in BLUE color
-      2. The text reads exactly "Star Spirit" (NOT "Star Alliance" or any other name)
-      Any other name or red-colored text means the monument is enemy-owned.
+      2. The text reads exactly "{faction_name}" (NOT any other faction name)
+      Possible factions: Star Spirit, Galactic Empire, Interstellar Federation, Star Alliance.
+      Any faction other than "{faction_name}" or red-colored text means the monument is enemy-owned.
     - **Action button**: A large button at the bottom — "Attack", "Claim", or similar.
       This is the strongest signal: "Attack" always means enemy, "Visit" always means friendly.
 
     Return JSON only:
     {
       "ownership": "<player/enemy/neutral/unknown>",
-      "is_friendly": <true ONLY if ownership text is BLUE and reads exactly "Star Spirit", false otherwise>,
+      "is_friendly": <true ONLY if ownership text is BLUE and reads exactly "{faction_name}", false otherwise>,
       "monument_name": "<name if visible>",
       "ownership_text": "<the exact text shown in the Monument Ownership section, e.g. 'Star Spirit' or a player/alliance name>",
       "defenders": [

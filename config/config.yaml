@@ -73,6 +73,9 @@ timing:
   jitter_factor: 0.3
 
 bot:
+  # Our faction name (one of: Star Spirit, Galactic Empire, Interstellar Federation, Star Alliance)
+  # Change this after matchmaking assigns your faction
+  faction: "Star Spirit"
   # Maximum consecutive errors before stopping
   max_consecutive_errors: 5
   # Maximum total errors before stopping

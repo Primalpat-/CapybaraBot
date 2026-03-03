@@ -187,10 +187,21 @@ def _is_power_text(text: str) -> bool:
 
 
 _BUTTON_WORDS = {"attack", "exit", "visit", "claim", "quick", "mining"}
+
+# All possible faction names in the game
+FACTION_NAMES = [
+    "star spirit",
+    "galactic empire",
+    "interstellar federation",
+    "star alliance",
+]
+
 _NOISE_WORDS = {
     "defense", "info", "estimated", "earnings", "hour", "level", "monument",
     "subject", "actual", "output", "ownership", "guard", "guarding",
     "not", "garrisoned", "empty",
+    # Faction names — these appear in the ownership section, not defender section
+    "star", "spirit", "galactic", "empire", "interstellar", "federation", "alliance",
 }
 
 
@@ -233,11 +244,16 @@ def _center_x(bbox) -> float:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def read_monument_popup(png_bytes: bytes) -> OCRMonumentReading:
+def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit") -> OCRMonumentReading:
     """Read monument popup from a screenshot using local OCR.
 
     Scans the entire popup region, then interprets all detected text by
     pattern matching — no hardcoded per-element crop positions needed.
+
+    Args:
+        png_bytes: Screenshot PNG data.
+        friendly_faction: Our faction name (lowercase). Used to determine
+            friendly vs enemy ownership.
     """
     # Decode PNG to OpenCV image
     arr = np.frombuffer(png_bytes, dtype=np.uint8)
@@ -400,23 +416,32 @@ def read_monument_popup(png_bytes: bytes) -> OCRMonumentReading:
             break
 
     if not ownership_name:
-        # Fallback: look for faction names below Ownership Info header
+        # Fallback: look for any faction name below Ownership Info header
         for d in detections:
             if ownership_info_y < 1.0 and d["cy"] < ownership_info_y:
                 continue
-            if "star spirit" in d["text"].lower():
-                ownership_name = d["text"]
-                ownership_color = _detect_text_color(popup, d["bbox"])
-                confidences.append(d["conf"])
+            d_lower = d["text"].lower()
+            for faction in FACTION_NAMES:
+                if faction in d_lower:
+                    ownership_name = d["text"]
+                    ownership_color = _detect_text_color(popup, d["bbox"])
+                    confidences.append(d["conf"])
+                    break
+            if ownership_name:
                 break
 
     if ownership_name:
         reading.ownership_text = ownership_name
         name_lower = ownership_name.lower()
         # Name match takes priority over color — the bbox for the whole
-        # ownership line often picks up background reds from UI/crystals
-        if "star spirit" in name_lower:
+        # ownership line often picks up background reds from UI/crystals.
+        # Check if ownership matches our faction name.
+        friendly_lower = friendly_faction.lower()
+        if friendly_lower in name_lower:
             reading.is_friendly = True
+        elif any(f in name_lower for f in FACTION_NAMES if f != friendly_lower):
+            # Recognized enemy faction name
+            reading.is_friendly = False
         elif ownership_color == "red":
             reading.is_friendly = False
         elif ownership_color == "blue":

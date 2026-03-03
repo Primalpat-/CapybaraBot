@@ -374,8 +374,12 @@ class StateHandlers:
         except Exception as e:
             logger.warning(f"Could not save calibration diagnostic: {e}")
 
-    def _call_vision(self, png_bytes: bytes, prompt_name: str) -> str:
-        """Call vision API with caching and logging."""
+    def _call_vision(self, png_bytes: bytes, prompt_name: str, **format_vars) -> str:
+        """Call vision API with caching and logging.
+
+        Extra keyword args are used to format {placeholders} in the prompt
+        template (e.g., faction_name="Star Spirit").
+        """
         cached = self.cache.get(png_bytes, prompt_name)
         if cached is not None:
             logger.debug(f"Vision cache hit for {prompt_name}")
@@ -383,6 +387,9 @@ class StateHandlers:
 
         logger.info(f"Calling Vision API: {prompt_name}")
         system, prompt = get_prompt(prompt_name)
+        if format_vars:
+            prompt = prompt.format(**format_vars)
+            system = system.format(**format_vars) if system else system
         response = self.vision.analyze_screenshot(png_bytes, prompt, system)
         self.cache.put(png_bytes, prompt_name, response.text)
         return response.text
@@ -405,9 +412,10 @@ class StateHandlers:
             return None
 
         threshold = ocr_cfg.get("confidence_threshold", 0.4)
+        faction = config.get("bot", {}).get("faction", "Star Spirit")
 
         try:
-            reading = read_monument_popup(png)
+            reading = read_monument_popup(png, friendly_faction=faction)
         except Exception as e:
             logger.warning(f"OCR failed: {e}")
             return None
@@ -1177,7 +1185,8 @@ class StateHandlers:
         # Try OCR first (free, ~200ms), fall back to Vision API
         info = self._read_monument_ocr(png, ctx, config)
         if info is None:
-            text = self._call_vision(png, "check_monument")
+            faction = config.get("bot", {}).get("faction", "Star Spirit")
+            text = self._call_vision(png, "check_monument", faction_name=faction)
             ctx.stats.vision_calls += 1
             info = parse_monument_info(text)
         ctx.monument_info = info
@@ -1433,7 +1442,8 @@ class StateHandlers:
         # Read the monument popup — try OCR first, Vision API fallback
         info = self._read_monument_ocr(png, ctx, config)
         if info is None:
-            text = self._call_vision(png, "check_monument")
+            faction = config.get("bot", {}).get("faction", "Star Spirit")
+            text = self._call_vision(png, "check_monument", faction_name=faction)
             ctx.stats.vision_calls += 1
             info = parse_monument_info(text)
         ctx.monument_info = info
@@ -1645,7 +1655,8 @@ class StateHandlers:
 
         info = self._read_monument_ocr(png, ctx, config)
         if info is None:
-            text = self._call_vision(png, "check_monument")
+            faction = config.get("bot", {}).get("faction", "Star Spirit")
+            text = self._call_vision(png, "check_monument", faction_name=faction)
             ctx.stats.vision_calls += 1
             info = parse_monument_info(text)
         ctx.monument_info = info

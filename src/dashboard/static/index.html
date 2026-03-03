@@ -181,6 +181,86 @@
         .tier-badge.tier-4 { background: #1a237e; color: #9fa8da; }
         .monument-card .flip-breakdown { font-size: 0.7em; color: #8899aa; margin-top: 2px; }
 
+        .settings-toggle {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            user-select: none;
+        }
+        .settings-toggle .arrow {
+            transition: transform 0.2s;
+            font-size: 0.8em;
+            color: #8899aa;
+        }
+        .settings-toggle .arrow.open { transform: rotate(90deg); }
+        .settings-body { display: none; }
+        .settings-body.open { display: block; }
+        .settings-group {
+            margin-bottom: 14px;
+        }
+        .settings-group h3 {
+            font-size: 0.85em;
+            color: #8899aa;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .settings-fields {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 8px;
+        }
+        .setting-field {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #1a1a2e;
+            padding: 6px 10px;
+            border-radius: 6px;
+        }
+        .setting-field label {
+            font-size: 0.8em;
+            color: #b0bec5;
+            flex: 1;
+            white-space: nowrap;
+        }
+        .setting-field input, .setting-field select {
+            width: 90px;
+            padding: 4px 6px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: #16213e;
+            color: #e0e0e0;
+            font-size: 0.85em;
+        }
+        .setting-field select { width: auto; min-width: 90px; }
+        .settings-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 10px;
+        }
+        .btn-save {
+            padding: 8px 24px;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 0.9em;
+            background: #0f3460;
+            color: white;
+        }
+        .btn-save:hover { background: #1a4a8a; }
+        .save-feedback {
+            font-size: 0.85em;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .save-feedback.show { opacity: 1; }
+        .save-feedback.success { color: #81c784; }
+        .save-feedback.error { color: #e57373; }
+
         @media (max-width: 768px) {
             .container { grid-template-columns: 1fr; }
             .monuments-grid { grid-template-columns: repeat(2, 1fr); }
@@ -201,6 +281,55 @@
                 <button class="btn-resume" onclick="apiPost('/api/resume')">Resume</button>
                 <button class="btn-stop" onclick="apiPost('/api/stop')">Stop</button>
                 <button class="btn-clear-flips" onclick="apiPost('/api/clear-flips')">Clear Flips</button>
+            </div>
+        </div>
+
+        <div class="panel full-width">
+            <h2 class="settings-toggle" onclick="toggleSettings()">Settings <span id="settings-arrow" class="arrow">&#9654;</span></h2>
+            <div id="settings-body" class="settings-body">
+                <div class="settings-group">
+                    <h3>Faction</h3>
+                    <div class="settings-fields">
+                        <div class="setting-field">
+                            <label>Your faction</label>
+                            <select id="cfg-faction">
+                                <option value="Star Spirit">Star Spirit</option>
+                                <option value="Galactic Empire">Galactic Empire</option>
+                                <option value="Interstellar Federation">Interstellar Federation</option>
+                                <option value="Star Alliance">Star Alliance</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <h3>Timing</h3>
+                    <div class="settings-fields">
+                        <div class="setting-field"><label>After tap (s)</label><input type="number" id="cfg-after_tap" step="0.1" min="0"></div>
+                        <div class="setting-field"><label>Screen transition (s)</label><input type="number" id="cfg-screen_transition" step="0.1" min="0"></div>
+                        <div class="setting-field"><label>Battle poll (s)</label><input type="number" id="cfg-battle_poll_interval" step="0.5" min="0"></div>
+                        <div class="setting-field"><label>Jitter (0-1)</label><input type="number" id="cfg-jitter_factor" step="0.05" min="0" max="1"></div>
+                        <div class="setting-field"><label>Loading wait (s)</label><input type="number" id="cfg-loading_wait" step="0.5" min="0"></div>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <h3>Contest</h3>
+                    <div class="settings-fields">
+                        <div class="setting-field"><label>Poll interval (s)</label><input type="number" id="cfg-poll_interval_seconds" step="1" min="1"></div>
+                        <div class="setting-field"><label>Max duration (s)</label><input type="number" id="cfg-max_duration_seconds" step="10" min="0"></div>
+                        <div class="setting-field"><label>Stable exit (s)</label><input type="number" id="cfg-stable_seconds" step="5" min="0"></div>
+                    </div>
+                </div>
+                <div class="settings-group">
+                    <h3>Recheck</h3>
+                    <div class="settings-fields">
+                        <div class="setting-field"><label>SAFE recheck (s)</label><input type="number" id="cfg-recheck_interval_seconds" step="30" min="0"></div>
+                        <div class="setting-field"><label>CHECK recheck (s)</label><input type="number" id="cfg-check_recheck_interval_seconds" step="30" min="0"></div>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="btn-save" onclick="saveConfig()">Save</button>
+                    <span id="save-feedback" class="save-feedback"></span>
+                </div>
             </div>
         </div>
 
@@ -408,6 +537,79 @@
             } catch (e) { /* ignore */ }
         }
 
+        function toggleSettings() {
+            const body = document.getElementById('settings-body');
+            const arrow = document.getElementById('settings-arrow');
+            body.classList.toggle('open');
+            arrow.classList.toggle('open');
+        }
+
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                if (!res.ok) return;
+                const data = await res.json();
+                document.getElementById('cfg-faction').value = data.bot.faction || 'Star Spirit';
+                // Timing
+                document.getElementById('cfg-after_tap').value = data.timing.after_tap;
+                document.getElementById('cfg-screen_transition').value = data.timing.screen_transition;
+                document.getElementById('cfg-battle_poll_interval').value = data.timing.battle_poll_interval;
+                document.getElementById('cfg-jitter_factor').value = data.timing.jitter_factor;
+                document.getElementById('cfg-loading_wait').value = data.timing.loading_wait;
+                // Contest
+                document.getElementById('cfg-poll_interval_seconds').value = data.contest.poll_interval_seconds;
+                document.getElementById('cfg-max_duration_seconds').value = data.contest.max_duration_seconds;
+                document.getElementById('cfg-stable_seconds').value = data.contest.stable_seconds;
+                // Recheck
+                document.getElementById('cfg-recheck_interval_seconds').value = data.persistence.recheck_interval_seconds;
+                document.getElementById('cfg-check_recheck_interval_seconds').value = data.persistence.check_recheck_interval_seconds;
+            } catch (e) {
+                console.error('Failed to load config:', e);
+            }
+        }
+
+        async function saveConfig() {
+            const feedback = document.getElementById('save-feedback');
+            const body = {
+                bot: { faction: document.getElementById('cfg-faction').value },
+                timing: {
+                    after_tap: parseFloat(document.getElementById('cfg-after_tap').value),
+                    screen_transition: parseFloat(document.getElementById('cfg-screen_transition').value),
+                    battle_poll_interval: parseFloat(document.getElementById('cfg-battle_poll_interval').value),
+                    jitter_factor: parseFloat(document.getElementById('cfg-jitter_factor').value),
+                    loading_wait: parseFloat(document.getElementById('cfg-loading_wait').value),
+                },
+                contest: {
+                    poll_interval_seconds: parseFloat(document.getElementById('cfg-poll_interval_seconds').value),
+                    max_duration_seconds: parseFloat(document.getElementById('cfg-max_duration_seconds').value),
+                    stable_seconds: parseFloat(document.getElementById('cfg-stable_seconds').value),
+                },
+                persistence: {
+                    recheck_interval_seconds: parseFloat(document.getElementById('cfg-recheck_interval_seconds').value),
+                    check_recheck_interval_seconds: parseFloat(document.getElementById('cfg-check_recheck_interval_seconds').value),
+                },
+            };
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body),
+                });
+                if (res.ok) {
+                    feedback.textContent = 'Saved';
+                    feedback.className = 'save-feedback show success';
+                } else {
+                    const err = await res.json();
+                    feedback.textContent = Array.isArray(err.detail) ? err.detail.join('; ') : (err.detail || 'Error');
+                    feedback.className = 'save-feedback show error';
+                }
+            } catch (e) {
+                feedback.textContent = 'Network error';
+                feedback.className = 'save-feedback show error';
+            }
+            setTimeout(() => { feedback.classList.remove('show'); }, 3000);
+        }
+
         // Poll intervals
         setInterval(updateStatus, 2000);
         setInterval(updateScreenshot, 3000);
@@ -417,6 +619,7 @@
         updateStatus();
         updateScreenshot();
         updateLogs();
+        loadConfig();
     </script>
 </body>
 </html>

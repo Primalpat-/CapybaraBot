@@ -175,6 +175,13 @@ class TestIsNameText:
     def test_power_text_not_name(self):
         assert _is_name_text("24.68M") is False
 
+    def test_faction_names_not_player_names(self):
+        """Faction words should be filtered out as noise."""
+        assert _is_name_text("Star Spirit") is False
+        assert _is_name_text("Galactic Empire") is False
+        assert _is_name_text("Interstellar Federation") is False
+        assert _is_name_text("Star Alliance") is False
+
 
 class TestCleanName:
     def test_strips_leading_quote(self):
