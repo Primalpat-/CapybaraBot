@@ -79,6 +79,7 @@ class StateHandlers:
         self._last_unbeatable_decay: float = time.time()  # when we last decayed the list
         self._attacking_defender: str | None = None  # defender we're currently fighting
         self._battle_result_png: bytes | None = None  # screenshot of battle result for defeat logging
+        self._skip_battle_no_ui_count = 0  # consecutive loops with no battle UI detected
         self._contest_until: float = 0.0  # timestamp — stay at monument and fight until this time
         self._event_logger = None   # persistence.EventLogger, injected from main.py
         self._periodic_saver = None  # persistence.PeriodicSaver, injected from main.py
@@ -1411,6 +1412,7 @@ class StateHandlers:
 
         if skip_found or ok_found:
             ctx.stats.battles_fought += 1
+            self._skip_battle_no_ui_count = 0
             if ok_found:
                 ctx.log_action("Battle already finished (detected OK button locally)")
             else:
@@ -1479,6 +1481,7 @@ class StateHandlers:
             # Battle ended — save screenshot for potential defeat analysis, tap OK
             ctx.log_action("Battle ended (OK button detected locally)")
             self._battle_result_png = png
+            self._skip_battle_no_ui_count = 0
             await self._tap_ok_button(png, ctx, config)
             return BotState.POST_BATTLE
 
@@ -1487,11 +1490,41 @@ class StateHandlers:
             battle_elements = self.element_detector.detect(png, "battle_active")
             skip_found = any(e.name == "skip_battle" for e in battle_elements)
 
-        if not skip_found and not ok_found:
-            # Neither button found — stuck detection (60s timeout) is our safety net
-            ctx.log_action("No battle UI detected locally — retrying")
-        else:
+        if skip_found:
+            self._skip_battle_no_ui_count = 0
             ctx.log_action("Battle still in progress...")
+            return BotState.SKIPPING_BATTLE
+
+        # Neither button found — track consecutive failures
+        self._skip_battle_no_ui_count += 1
+        ctx.log_action(
+            f"No battle UI detected locally ({self._skip_battle_no_ui_count}/4) — retrying"
+        )
+
+        # After 4 failed attempts, use Vision to figure out what screen we're on
+        if self._skip_battle_no_ui_count >= 4:
+            self._skip_battle_no_ui_count = 0
+            ctx.log_action("Battle UI not found after multiple attempts — using Vision to identify screen")
+            _, screen = await self._identify_screen(png, ctx, config)
+            ctx.log_action(f"Vision says: {screen.screen_type} (conf={screen.confidence:.2f})")
+
+            if screen.screen_type == "battle_result":
+                ctx.log_action("Battle result detected via Vision — tapping OK")
+                self._battle_result_png = png
+                await self._tap_ok_button(png, ctx, config)
+                return BotState.POST_BATTLE
+            elif screen.screen_type == "battle_active":
+                ctx.log_action("Battle still active per Vision — continuing")
+                return BotState.SKIPPING_BATTLE
+            elif screen.screen_type == "monument_popup":
+                ctx.log_action("Monument popup visible — battle may have ended already")
+                return BotState.POST_BATTLE
+            elif screen.screen_type in ("main_map", "minimap"):
+                ctx.log_action("Back on map — battle flow completed")
+                return BotState.OPENING_MINIMAP
+            else:
+                ctx.log_action(f"Unexpected screen '{screen.screen_type}' — reinitializing")
+                return BotState.INITIALIZING
 
         return BotState.SKIPPING_BATTLE
 
