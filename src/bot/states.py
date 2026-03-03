@@ -707,18 +707,24 @@ class StateHandlers:
         else:
             ctx.log_action(f"Could not calibrate any elements for {screen_type}")
 
-    def _popup_detected_locally(self, png_bytes: bytes) -> bool:
+    def _popup_detected_locally(self, png_bytes: bytes, strict: bool = True) -> bool:
         """Check if a monument popup is open using local element detection.
 
-        Requires BOTH action_button AND close_popup to be found.  Checking
-        for just one causes false positives — the main map's bottom nav
-        (Mining, Shop, etc.) has yellow buttons that match action_button.
+        Args:
+            strict: If True, require BOTH action_button AND close_popup.
+                Use strict=True before tapping (prevents false positives from
+                the main map's yellow Mining/Shop nav buttons).
+                Use strict=False after tapping the monument — action_button
+                alone suffices since we just tapped and close_popup shape
+                detection is unreliable.
         """
         if self.element_detector is None:
             return False
         popup_els = self.element_detector.detect(png_bytes, "monument_popup")
         names = {e.name for e in popup_els}
-        return "action_button" in names and "close_popup" in names
+        if strict:
+            return "action_button" in names and "close_popup" in names
+        return "action_button" in names
 
     @staticmethod
     def _is_loading_screen(png_bytes: bytes, threshold: float = 18.0) -> bool:
@@ -1243,7 +1249,7 @@ class StateHandlers:
 
             check_png = await self.capture.capture()
             ctx.last_screenshot = check_png
-            if self._popup_detected_locally(check_png):
+            if self._popup_detected_locally(check_png, strict=False):
                 if i > 0:
                     # Offset worked — update calibration
                     new_x_pct = tx / self._screen_w * 100
@@ -1528,7 +1534,7 @@ class StateHandlers:
                 return BotState.INITIALIZING
 
         # Check locally for monument popup (require both action + close buttons)
-        popup_detected = self._popup_detected_locally(png)
+        popup_detected = self._popup_detected_locally(png, strict=False)
 
         if not popup_detected:
             # Popup not visible — tap the monument to reopen it
