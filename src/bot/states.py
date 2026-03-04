@@ -35,6 +35,7 @@ from src.vision.parser import (
 )
 from src.vision.ocr_reader import read_monument_popup, check_screen_ocr, check_if_shop
 from src.vision.prompts import get_prompt
+from src.vision.screen_analyzer import ScreenAnalyzer, ScreenAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class StateHandlers:
         calibrator: CoordinateCalibrator,
         element_detector: ElementDetector | None = None,
         state_machine=None,
+        screen_analyzer: ScreenAnalyzer | None = None,
     ):
         self.capture = capture
         self.input = adb_input
@@ -65,6 +67,7 @@ class StateHandlers:
         self.calibrator = calibrator
         self.element_detector = element_detector
         self._state_machine = state_machine
+        self.screen_analyzer = screen_analyzer
         self._visited_slots: set[int] = set()
         self._screen_w = config.get("screen", {}).get("width", 1080)
         self._screen_h = config.get("screen", {}).get("height", 1920)
@@ -780,12 +783,42 @@ class StateHandlers:
     async def _wait_past_loading(
         self, ctx: BotContext, config: dict, label: str = "screen"
     ) -> tuple[bytes, object]:
-        """Wait past black screens locally, then identify with Vision.
+        """Wait past black screens locally, then identify screen.
 
-        Uses pixel brightness to skip loading screens for free, and only calls
-        the Vision API once the screen has actual content.
+        Uses pixel brightness to skip loading screens for free, then tries
+        local ScreenAnalyzer (element detection + OCR) before falling back
+        to the Vision API.
         """
         png = await self._wait_past_loading_local(ctx, config, label)
+
+        # Try local analysis first (free, fast)
+        if self.screen_analyzer is not None:
+            analysis = self.screen_analyzer.analyze(png)
+            if analysis.confidence >= 0.6:
+                logger.info(
+                    f"Local screen detection: {analysis.screen_type} "
+                    f"(method={analysis.method}, conf={analysis.confidence:.2f})"
+                )
+                # Store discovered elements in calibrator
+                for name, (x, y, conf) in analysis.elements.items():
+                    if conf >= 0.7:
+                        self.calibrator.store(name, x, y, conf)
+                if analysis.elements:
+                    self.calibrator.save()
+
+                # Convert to ScreenIdentification-compatible object
+                screen = parse_screen_identification(
+                    f'{{"screen_type": "{analysis.screen_type}", '
+                    f'"confidence": {analysis.confidence}, '
+                    f'"details": "local {analysis.method} detection", '
+                    f'"timer": "{analysis.timer or ""}"}}'
+                )
+                return png, screen
+
+            logger.info(
+                f"Local analysis inconclusive ({analysis.screen_type}, "
+                f"conf={analysis.confidence:.2f}) — falling back to Vision API"
+            )
 
         text = self._call_vision(png, "identify_screen")
         ctx.stats.vision_calls += 1
