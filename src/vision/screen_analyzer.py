@@ -21,7 +21,7 @@ from PIL import Image, ImageStat
 
 from src.vision.element_detector import ElementDetector
 from src.vision.minimap_detector import find_minimap_squares
-from src.vision.ocr_reader import _get_reader, _enhance_for_ocr, _TIMER_RE
+from src.vision.ocr_reader import _get_reader, _enhance_for_ocr
 
 logger = logging.getLogger(__name__)
 
@@ -42,33 +42,43 @@ class ScreenAnalysis:
 # ── Element signature mapping ─────────────────────────────────────
 # If a signature element is found with high confidence → infer screen type.
 # Maps element_name → screen_type.
+#
+# IMPORTANT: Only include elements that are visually UNIQUE to their screen.
+# Color-only detections (yellow buttons, green buttons) are too ambiguous —
+# yellow appears in nav bars, monument popups, battle results, and logged_out.
+# Green appears in nav bar icons, skip buttons, and minimap checkmarks.
+# Purple appears in various UI chrome across most screens.
+#
+# Reliable signatures:
+#   - Template matches (star_trek_button, alien_minefield_button): pixel patterns
+#   - Pink cancel button: pink is rare in game UI
+#   - Dark screen + ok_button: battle_result has uniquely dark background (~36 brightness)
 
 _ELEMENT_SIGNATURES: dict[str, str] = {
-    "skip_battle": "battle_active",
-    "ok_button": "battle_result",
-    "restart_button": "logged_out",
-    "star_trek_button": "home_screen",
-    "alien_minefield_button": "mode_select",
-    "occupy_cancel_button": "occupy_prompt",
+    "star_trek_button": "home_screen",           # template match — very specific
+    "alien_minefield_button": "mode_select",      # template match — very specific
+    "occupy_cancel_button": "occupy_prompt",      # pink button — distinctive color
 }
 
-# Which screen types to probe for element detection.
-# We check the unique signature screens (not monument_popup/main_map since
-# those elements aren't unique enough on their own).
+# Which screen types to probe for element detection (template + pink only).
 _SIGNATURE_SCREEN_TYPES = [
-    "battle_active",
-    "battle_result",
-    "logged_out",
     "home_screen",
     "mode_select",
     "occupy_prompt",
 ]
 
+# Battle result screens have very dark backgrounds (brightness ~36).
+# Other screens with yellow buttons are much brighter (main_map ~76,
+# monument_popup ~113). This threshold gates ok_button detection to
+# avoid false positives from yellow nav bar / popup buttons.
+_DARK_SCREEN_THRESHOLD = 55
+
 # ── OCR keyword patterns ──────────────────────────────────────────
 # Each screen type has keywords. Match threshold varies per screen.
 
 _SCREEN_KEYWORDS: dict[str, set[str]] = {
-    "monument_popup":  {"defense info", "ownership", "not garrisoned", "garrisoned"},
+    "monument_popup":  {"defense info", "ownership", "not garrisoned", "garrisoned",
+                        "mecha armament"},
     "hibernation":     {"hibernation"},
     "cant_attack":     {"cannot attack"},
     "logged_out":      {"logged in on another device"},
@@ -77,26 +87,32 @@ _SCREEN_KEYWORDS: dict[str, set[str]] = {
     "occupy_prompt":   {"continue to occupy", "abandon"},
     "daily_popup":     {"do not show again"},
     "battle_result":   {"victory", "defeat", "battle report"},
-    "main_map":        {"mining", "leaderboard", "mine"},
+    "battle_active":   {"skip"},
+    "main_map":        {"dormant"},
 }
 
 # Screens where 1 keyword is enough (they're unique enough)
-_SINGLE_KEYWORD_SCREENS = {"hibernation", "cant_attack", "logged_out"}
+_SINGLE_KEYWORD_SCREENS = {"hibernation", "cant_attack", "logged_out",
+                           "battle_active", "main_map"}
 
 # ── OCR text → element position mapping ───────────────────────────
 # When OCR finds specific text, its bounding box center becomes an element.
-# Format: (keyword, element_name, min_y_pct, max_y_pct)
+# Format: (keyword, element_name, min_y_pct, max_y_pct, allowed_screens)
+# allowed_screens: if set, only extract the element when the detected screen
+# matches. None = always extract.
 
-_TEXT_TO_ELEMENT: list[tuple[str, str, float, float]] = [
-    ("attack", "action_button", 70.0, 100.0),
-    ("visit", "action_button", 70.0, 100.0),
-    ("mining", "action_button", 70.0, 100.0),
-    ("skip", "skip_battle", 0.0, 100.0),
-    ("ok", "ok_button", 50.0, 100.0),
-    ("restart", "restart_button", 0.0, 100.0),
-    ("cancel", "occupy_cancel_button", 50.0, 100.0),
-    ("star trek", "star_trek_button", 0.0, 100.0),
-    ("alien minefield", "alien_minefield_button", 0.0, 100.0),
+_TEXT_TO_ELEMENT: list[tuple[str, str, float, float, set[str] | None]] = [
+    ("attack", "action_button", 70.0, 100.0, {"monument_popup"}),
+    ("occupy", "action_button", 70.0, 100.0, {"monument_popup"}),
+    ("garrison", "action_button", 70.0, 100.0, {"monument_popup"}),
+    ("visit", "action_button", 70.0, 100.0, {"monument_popup"}),
+    ("mining", "action_button", 70.0, 100.0, {"monument_popup"}),
+    ("skip", "skip_battle", 0.0, 100.0, {"battle_active"}),
+    ("ok", "ok_button", 50.0, 100.0, {"battle_result"}),
+    ("restart", "restart_button", 0.0, 100.0, {"logged_out"}),
+    ("cancel", "occupy_cancel_button", 50.0, 100.0, {"occupy_prompt"}),
+    ("star trek", "star_trek_button", 0.0, 100.0, {"home_screen", "mode_select"}),
+    ("alien minefield", "alien_minefield_button", 0.0, 100.0, {"mode_select"}),
 ]
 
 
@@ -165,20 +181,28 @@ class ScreenAnalyzer:
     # ── Tier 2: Element signatures ────────────────────────────────
 
     def _check_element_signatures(self, png_bytes: bytes) -> ScreenAnalysis | None:
-        """Detect known UI elements → infer screen type."""
+        """Detect known UI elements → infer screen type.
+
+        Only checks template-matched elements (star_trek, alien_minefield) and
+        distinctively-colored elements (pink cancel button). Color-only yellow/
+        green/purple detections are NOT used here because they false-positive
+        across many screens (nav bar, popups, UI chrome).
+
+        Additionally checks for battle_result via dark background + ok_button:
+        battle_result screens have uniquely low brightness (~36) compared to
+        all other screens with yellow buttons (main_map ~76, popup ~113).
+        """
         analysis = ScreenAnalysis()
         best_screen = None
         best_conf = 0.0
 
+        # Check template + pink signatures
         for screen_type in _SIGNATURE_SCREEN_TYPES:
             detections = self._element_detector.detect(png_bytes, screen_type)
             for det in detections:
-                # Store all detected elements
                 analysis.elements[det.name] = (
                     det.x_percent, det.y_percent, det.confidence
                 )
-
-                # Check if this is a signature element
                 if det.name in _ELEMENT_SIGNATURES and det.confidence >= 0.7:
                     sig_screen = _ELEMENT_SIGNATURES[det.name]
                     if det.confidence > best_conf:
@@ -195,13 +219,34 @@ class ScreenAnalyzer:
             )
             return analysis
 
-        # Elements found but no signature match — store them for caller
-        if analysis.elements:
-            return None  # fall through to next tier, but elements are lost
-            # Actually, we can't pass partial results between tiers easily.
-            # Return None and let OCR tier re-discover if needed.
+        # Dark screen + ok_button → battle_result
+        # Only check when screen is dark enough to rule out main_map/popup yellow buttons
+        brightness = self._get_brightness(png_bytes)
+        if brightness is not None and brightness < _DARK_SCREEN_THRESHOLD:
+            detections = self._element_detector.detect(png_bytes, "battle_result")
+            for det in detections:
+                if det.name == "ok_button" and det.confidence >= 0.7:
+                    logger.info(
+                        f"ScreenAnalyzer: dark screen (brightness={brightness:.0f}) "
+                        f"+ ok_button → battle_result (conf={det.confidence:.2f})"
+                    )
+                    return ScreenAnalysis(
+                        screen_type="battle_result",
+                        confidence=det.confidence,
+                        method="element",
+                        elements={det.name: (det.x_percent, det.y_percent, det.confidence)},
+                    )
 
         return None
+
+    @staticmethod
+    def _get_brightness(png_bytes: bytes) -> float | None:
+        """Get mean pixel brightness (0-255) of an image."""
+        try:
+            image = Image.open(io.BytesIO(png_bytes)).convert("L")
+            return ImageStat.Stat(image).mean[0]
+        except Exception:
+            return None
 
     # ── Tier 2.5: Minimap detection ───────────────────────────────
 
@@ -296,8 +341,11 @@ class ScreenAnalyzer:
 
             # Extract element positions from OCR text
             for d in detections:
-                for keyword, element_name, min_y, max_y in _TEXT_TO_ELEMENT:
+                for keyword, element_name, min_y, max_y, allowed in _TEXT_TO_ELEMENT:
                     if keyword in d["lower"] and min_y <= d["cy"] <= max_y:
+                        # Only extract if screen type matches (when filter is set)
+                        if allowed is not None and best_screen not in allowed:
+                            break
                         # Don't overwrite higher-confidence detections
                         if element_name not in analysis.elements or d["conf"] > analysis.elements[element_name][2]:
                             analysis.elements[element_name] = (

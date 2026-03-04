@@ -89,15 +89,27 @@ class TestBrightnessDetection:
 
 
 class TestElementSignatureDetection:
-    """Tier 2 — element detection → screen type inference."""
+    """Tier 2 — element detection → screen type inference.
+
+    Only template-matched and distinctively-colored (pink) elements are used
+    as signatures. Yellow/green/purple color-only detections are too ambiguous
+    across screens (nav bar, popups, UI chrome).
+
+    battle_result uses a dark-screen check: brightness < 55 + ok_button.
+    """
 
     def setup_method(self):
         self.detector = ElementDetector()
         self.analyzer = ScreenAnalyzer(self.detector, {})
 
-    def test_ok_button_infers_battle_result(self):
-        """Yellow OK button → battle_result."""
-        img = _make_image()
+    def test_ok_button_on_dark_screen_infers_battle_result(self):
+        """Yellow OK button on DARK screen → battle_result.
+
+        The dark background (brightness ~36) is unique to battle result screens.
+        Without the dark check, yellow buttons on main_map/popups false-positive.
+        """
+        # brightness=30 simulates dark battle result screen
+        img = _make_image(brightness=30)
         h, w = img.shape[:2]
         _draw_yellow_button(img, w // 2, int(h * 0.85))
         png = _to_png(img)
@@ -108,17 +120,20 @@ class TestElementSignatureDetection:
         assert result.confidence >= 0.7
         assert "ok_button" in result.elements
 
-    def test_skip_button_infers_battle_active(self):
-        """Green skip button → battle_active."""
-        img = _make_image()
+    def test_ok_button_on_bright_screen_NOT_battle_result(self):
+        """Yellow button on BRIGHT screen should NOT be classified as battle_result.
+
+        This prevents false positives from yellow nav bar buttons, monument
+        popup action buttons, etc. which all have brightness > 55.
+        """
+        # brightness=80 simulates main_map/popup (not battle)
+        img = _make_image(brightness=80)
         h, w = img.shape[:2]
-        _draw_green_button(img, int(w * 0.75), int(h * 0.85))
+        _draw_yellow_button(img, w // 2, int(h * 0.85))
         png = _to_png(img)
 
         result = self.analyzer.analyze(png)
-        assert result.screen_type == "battle_active"
-        assert result.method == "element"
-        assert "skip_battle" in result.elements
+        assert result.screen_type != "battle_result" or result.method != "element"
 
     def test_cancel_button_infers_occupy_prompt(self):
         """Pink cancel button → occupy_prompt."""
@@ -132,31 +147,44 @@ class TestElementSignatureDetection:
         assert result.method == "element"
         assert "occupy_cancel_button" in result.elements
 
-    def test_restart_button_infers_logged_out(self):
-        """Yellow restart button at center → logged_out."""
-        img = _make_image()
-        h, w = img.shape[:2]
-        _draw_yellow_button(img, w // 2, h // 2)
-        png = _to_png(img)
+    def test_green_button_not_used_as_signature(self):
+        """Green buttons should NOT be used for screen identification.
 
-        result = self.analyzer.analyze(png)
-        assert result.screen_type == "logged_out"
-        assert result.method == "element"
-        assert "restart_button" in result.elements
-
-    def test_element_positions_stored(self):
-        """Detected element positions should be stored in result.elements."""
-        img = _make_image()
+        Green skip buttons false-positive on main_map nav bar icons.
+        """
+        img = _make_image(brightness=80)
         h, w = img.shape[:2]
         _draw_green_button(img, int(w * 0.75), int(h * 0.85))
         png = _to_png(img)
 
-        result = self.analyzer.analyze(png)
-        assert "skip_battle" in result.elements
-        x, y, conf = result.elements["skip_battle"]
-        assert 60 < x < 90
-        assert 75 < y < 95
-        assert conf >= 0.7
+        # Mock out OCR to isolate element detection behavior
+        with patch("src.vision.screen_analyzer.find_minimap_squares", return_value=None):
+            with patch("src.vision.screen_analyzer._get_reader") as mock_get_reader:
+                mock_reader = MagicMock()
+                mock_reader.readtext.return_value = []
+                mock_get_reader.return_value = mock_reader
+                result = self.analyzer.analyze(png)
+                # Should NOT be classified as battle_active via element detection
+                assert result.method != "element" or result.screen_type != "battle_active"
+
+    def test_yellow_button_center_not_used_as_signature(self):
+        """Yellow buttons in center region should NOT identify as logged_out.
+
+        Yellow restart_button detection false-positives on monument popup
+        Attack/Garrison/Occupy buttons which are also yellow and centered.
+        """
+        img = _make_image(brightness=80)
+        h, w = img.shape[:2]
+        _draw_yellow_button(img, w // 2, h // 2)
+        png = _to_png(img)
+
+        with patch("src.vision.screen_analyzer.find_minimap_squares", return_value=None):
+            with patch("src.vision.screen_analyzer._get_reader") as mock_get_reader:
+                mock_reader = MagicMock()
+                mock_reader.readtext.return_value = []
+                mock_get_reader.return_value = mock_reader
+                result = self.analyzer.analyze(png)
+                assert result.method != "element" or result.screen_type != "logged_out"
 
 
 class TestMinimap:
@@ -383,16 +411,16 @@ class TestTierFallback:
         detector.detect.assert_not_called()
 
     def test_element_match_stops_before_ocr(self):
-        """Element match should not trigger OCR."""
-        img = _make_image()
+        """Element match (dark screen + ok_button) should not trigger OCR."""
+        img = _make_image(brightness=30)
         h, w = img.shape[:2]
-        _draw_green_button(img, int(w * 0.75), int(h * 0.85))
+        _draw_yellow_button(img, w // 2, int(h * 0.85))
         png = _to_png(img)
 
         analyzer = ScreenAnalyzer(ElementDetector(), {})
         with patch("src.vision.screen_analyzer._get_reader") as mock_reader:
             result = analyzer.analyze(png)
-            assert result.screen_type == "battle_active"
+            assert result.screen_type == "battle_result"
             assert result.method == "element"
             mock_reader.assert_not_called()
 
@@ -426,14 +454,14 @@ class TestScreenKeywordConfig:
     def test_element_signatures_cover_known_screens(self):
         """All signature elements map to valid screen types."""
         valid_screens = set(_SCREEN_KEYWORDS.keys()) | {
-            "battle_active", "minimap", "loading", "unknown",
+            "minimap", "loading", "unknown",
         }
         for element, screen in _ELEMENT_SIGNATURES.items():
             assert screen in valid_screens, f"{element} → {screen} not a valid screen"
 
     def test_text_to_element_keywords_are_lowercase(self):
         """All _TEXT_TO_ELEMENT keywords should be lowercase."""
-        for keyword, _, _, _ in _TEXT_TO_ELEMENT:
+        for keyword, _, _, _, _ in _TEXT_TO_ELEMENT:
             assert keyword == keyword.lower()
 
 
