@@ -24,7 +24,7 @@ bot:
 contest:
   flip_velocity_threshold: 2.0
   max_duration_seconds: 300
-  poll_interval_seconds: 18
+  poll_interval_seconds: 8
   power_vulnerability_threshold: 5000
   recent_flip_seconds: 120
   stable_seconds: 120
@@ -71,7 +71,7 @@ screen:
 timing:
   after_swipe: 1.2
   after_tap: 0.8
-  battle_poll_interval: 3
+  battle_poll_interval: 2
   error_recovery_wait: 3.0
   jitter_factor: 0.3
   loading_max_retries: 6
