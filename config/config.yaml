@@ -36,8 +36,8 @@ coordinates:
     x: 100
     y: 100
   close_popup:
-    x: 950
-    y: 400
+    x: 450
+    y: 1512
   minimap_button:
     x: 980
     y: 180

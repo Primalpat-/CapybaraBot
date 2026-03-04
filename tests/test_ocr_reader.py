@@ -8,6 +8,7 @@ from src.vision.ocr_reader import (
     _crop_region,
     _detect_text_color,
     _extract_power_number,
+    _fix_ocr_digits,
     _is_name_text,
     _is_noise_text,
     _is_power_text,
@@ -64,6 +65,99 @@ class TestExtractPowerNumber:
 
     def test_trillions_suffix(self):
         assert _extract_power_number("2.3T") == 2300000000000
+
+    # ── Nearby number noise ─────────────────────────────────────
+
+    def test_noise_prefix_with_space(self):
+        """'551 32.48M' — slot badge before power, separated by space."""
+        assert _extract_power_number("551 32.48M") == 32480000
+
+    def test_noise_prefix_no_space(self):
+        """'55132.48M' — no space, noise concatenated with power."""
+        assert _extract_power_number("55132.48M") == 32480000
+
+    def test_noise_prefix_with_space_K(self):
+        """'2 14.28K' — slot number before power."""
+        assert _extract_power_number("2 14.28K") == 14280
+
+    # ── OCR character misreads ──────────────────────────────────
+
+    def test_z_for_2(self):
+        """OCR reads 'z' instead of '2'."""
+        assert _extract_power_number("3z.48M") == 32480000
+
+    def test_Z_for_2(self):
+        """OCR reads 'Z' instead of '2'."""
+        assert _extract_power_number("3Z.48M") == 32480000
+
+    def test_l_for_1(self):
+        """OCR reads 'l' (lowercase L) instead of '1'."""
+        assert _extract_power_number("l9.9M") == 19900000
+
+    def test_I_for_1(self):
+        """OCR reads 'I' instead of '1'."""
+        assert _extract_power_number("I9.71M") == 19710000
+
+    def test_O_for_0(self):
+        """OCR reads 'O' instead of '0'."""
+        assert _extract_power_number("2O.5M") == 20500000
+
+    def test_multiple_misreads(self):
+        """Multiple OCR confusions in one string."""
+        assert _extract_power_number("l2.3zM") == 12320000
+
+    # ── Lost decimal point ──────────────────────────────────────
+
+    def test_lost_decimal_19Z1M(self):
+        """'19Z1M' — OCR misread '.71' as 'Z1'. After fix → '1921M' → insert decimal → '19.21M'."""
+        assert _extract_power_number("19Z1M") == 19210000
+
+    def test_lost_decimal_4digit_integer(self):
+        """'3248M' — 4-digit integer, decimal was lost → '32.48M'."""
+        assert _extract_power_number("3248M") == 32480000
+
+    def test_3digit_integer_unchanged(self):
+        """'100M' — 3-digit integer is valid (no decimal insertion)."""
+        assert _extract_power_number("100M") == 100000000
+
+    def test_1digit_integer_unchanged(self):
+        """'3M' — single digit, no correction needed."""
+        assert _extract_power_number("3M") == 3000000
+
+
+class TestFixOCRDigits:
+    """Test OCR character→digit correction with adjacency guard."""
+
+    def test_z_adjacent_to_digit(self):
+        assert _fix_ocr_digits("3z.48M") == "32.48M"
+
+    def test_l_adjacent_to_digit(self):
+        assert _fix_ocr_digits("l9.9M") == "19.9M"
+
+    def test_I_adjacent_to_digit(self):
+        assert _fix_ocr_digits("I9.71M") == "19.71M"
+
+    def test_O_adjacent_to_digit(self):
+        assert _fix_ocr_digits("2O.5M") == "20.5M"
+
+    def test_pipe_adjacent_to_digit(self):
+        assert _fix_ocr_digits("3|.5M") == "31.5M"
+
+    def test_no_correction_in_plain_text(self):
+        """Letters not adjacent to digits should be preserved."""
+        assert _fix_ocr_digits("Zombie") == "Zombie"
+        assert _fix_ocr_digits("Oil") == "Oil"
+        assert _fix_ocr_digits("hello") == "hello"
+
+    def test_no_correction_for_suffix_letters(self):
+        """Suffix M/K/B/T should not be corrupted."""
+        assert _fix_ocr_digits("32.48M") == "32.48M"
+
+    def test_already_correct(self):
+        assert _fix_ocr_digits("19.71M") == "19.71M"
+
+    def test_empty_string(self):
+        assert _fix_ocr_digits("") == ""
 
 
 class TestDetectTextColor:
@@ -142,6 +236,16 @@ class TestIsPowerText:
         """Earnings text like '4500/hour' has no suffix."""
         assert _is_power_text("4500/hour") is False
         assert _is_power_text("450/hour") is False
+
+    def test_ocr_misread_z_for_2(self):
+        """'3z.48M' should be recognized as power text after correction."""
+        assert _is_power_text("3z.48M") is True
+
+    def test_ocr_misread_l_for_1(self):
+        assert _is_power_text("l9.9M") is True
+
+    def test_ocr_misread_O_for_0(self):
+        assert _is_power_text("2O.5M") is True
 
 
 class TestIsNoiseText:

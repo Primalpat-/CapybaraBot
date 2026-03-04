@@ -157,28 +157,92 @@ def _detect_text_color(image: np.ndarray, bbox) -> str:
     return "unknown"
 
 
+_OCR_DIGIT_MAP = {
+    'O': '0', 'o': '0',
+    'l': '1', 'I': '1', '|': '1',
+    'Z': '2', 'z': '2',
+}
+
+
+def _fix_ocr_digits(text: str) -> str:
+    """Fix common OCR character→digit confusions when adjacent to actual digits.
+
+    Only corrects characters that neighbour a real digit or decimal/comma
+    separator, so genuine text like "Zombie" or "Oil" is not corrupted.
+
+    Common misreads handled: O/o→0, l/I/|→1, Z/z→2.
+    """
+    chars = list(text)
+    for i, ch in enumerate(chars):
+        if ch not in _OCR_DIGIT_MAP:
+            continue
+        prev_digit = i > 0 and chars[i - 1] in '0123456789.,'
+        next_digit = i < len(chars) - 1 and chars[i + 1] in '0123456789.,'
+        if prev_digit or next_digit:
+            chars[i] = _OCR_DIGIT_MAP[ch]
+    return ''.join(chars)
+
+
+def _parse_power_suffix(num_str: str, suffix_char: str) -> int:
+    """Convert a number string + suffix letter (K/M/B/T) to an integer.
+
+    Guards against two common OCR artefacts:
+
+    1. Noise concatenation — a nearby number merges with the power value,
+       producing too many digits before the decimal (e.g. "55132.48M" from
+       "551" + "32.48M").  Fix: keep only the last 2 digits before the dot.
+
+    2. Lost decimal point — the '.' is misread so the entire number appears
+       as a 4+ digit integer (e.g. "1921M" from "19.71M" where '.7' became
+       'Z1' then '21').  Fix: re-insert decimal after digit 2 so "1921"
+       becomes "19.21".  Game powers are always displayed as X.XX or XX.XX
+       before the suffix, never as raw 4-digit integers.
+    """
+    num_str = num_str.replace(",", ".")
+    suffix = suffix_char.upper()
+    dot_pos = num_str.find('.')
+    if dot_pos > 3:
+        # Too many digits before decimal — noise prefix
+        num_str = num_str[dot_pos - 2:]
+    elif dot_pos < 0 and len(num_str) >= 4:
+        # No decimal but 4+ digits — decimal was probably lost by OCR
+        num_str = num_str[:2] + '.' + num_str[2:]
+    try:
+        value = float(num_str)
+        multipliers = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000, "T": 1_000_000_000_000}
+        return round(value * multipliers.get(suffix, 1))
+    except ValueError:
+        return 0
+
+
 def _extract_power_number(text: str) -> int:
     """Extract a numeric power value from OCR text.
 
     Handles formats like: "24.68M", "14.28K", "12,345", "12345"
     M = millions, K = thousands. Returns 0 if no number found.
+
+    Also handles:
+      - Nearby number noise: "551 32.48M" → 32_480_000
+      - OCR misreads: "3z.48M" → "32.48M" → 32_480_000
     """
     if not text:
         return 0
 
-    cleaned = text.strip()
+    cleaned = _fix_ocr_digits(text.strip())
 
-    # Try number with magnitude suffix (e.g., "24.68M", "14.28K", "3B")
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*([KkMmBbTt])", cleaned)
+    # Strategy 1: Split by whitespace and try each token right-to-left.
+    # Power values (e.g. "32.48M") are the rightmost suffixed number;
+    # preceding tokens like "551" (slot badge) are noise.
+    _SUFFIX_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*([KkMmBbTt])$")
+    for token in reversed(cleaned.split()):
+        m = _SUFFIX_RE.match(token)
+        if m:
+            return _parse_power_suffix(m.group(1), m.group(2))
+
+    # Strategy 2: Full-string search (handles no-space concatenation).
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*([KkMmBbTt])(?![a-zA-Z])", cleaned)
     if match:
-        num_str = match.group(1).replace(",", ".")
-        suffix = match.group(2).upper()
-        try:
-            value = float(num_str)
-            multipliers = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000, "T": 1_000_000_000_000}
-            return int(value * multipliers.get(suffix, 1))
-        except ValueError:
-            pass
+        return _parse_power_suffix(match.group(1), match.group(2))
 
     # Try numbers with commas (e.g., "12,345")
     match = re.search(r"[\d,]+\d", cleaned)
@@ -205,8 +269,10 @@ def _is_power_text(text: str) -> bool:
 
     Number directly followed by suffix letter, suffix not followed by more
     letters (avoids "11 Monument" matching on "M").
+    Applies OCR digit correction first so "3z.48M" is recognized.
     """
-    return bool(re.search(r"\d+[.,]?\d*[KkMmBbTt](?![a-zA-Z])", text))
+    cleaned = _fix_ocr_digits(text)
+    return bool(re.search(r"\d+[.,]?\d*[KkMmBbTt](?![a-zA-Z])", cleaned))
 
 
 _BUTTON_WORDS = {"attack", "exit", "visit", "claim", "quick", "mining"}

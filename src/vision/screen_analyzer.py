@@ -115,6 +115,20 @@ _TEXT_TO_ELEMENT: list[tuple[str, str, float, float, set[str] | None]] = [
     ("alien minefield", "alien_minefield_button", 0.0, 100.0, {"mode_select"}),
 ]
 
+# ── Fixed element positions for popups ────────────────────────────
+# Some elements (like close/X buttons) are icons not text, so OCR can't find
+# them. These are at fixed, consistent positions across all popup variants.
+# Format: screen_type → {element_name: (x_pct, y_pct, confidence)}
+
+_FIXED_ELEMENTS: dict[str, dict[str, tuple[float, float, float]]] = {
+    "monument_popup": {
+        "close_popup": (50.0, 94.5, 0.75),   # X button always at bottom-center
+    },
+    "minimap": {
+        "minimap_close": (50.0, 94.5, 0.75),  # X button same position
+    },
+}
+
 
 class ScreenAnalyzer:
     """Local-first screen detection with tiered fallback to Vision API."""
@@ -143,16 +157,19 @@ class ScreenAnalyzer:
         # ── Tier 2: Element signatures ────────────────────────────
         result = self._check_element_signatures(png_bytes)
         if result is not None:
+            self._inject_fixed_elements(result)
             return result
 
         # ── Tier 2.5: Minimap detection ───────────────────────────
         result = self._check_minimap(png_bytes)
         if result is not None:
+            self._inject_fixed_elements(result)
             return result
 
         # ── Tier 3: OCR keyword matching ──────────────────────────
         result = self._check_ocr_keywords(png_bytes)
         if result is not None:
+            self._inject_fixed_elements(result)
             return result
 
         # No tier matched with sufficient confidence
@@ -247,6 +264,16 @@ class ScreenAnalyzer:
             return ImageStat.Stat(image).mean[0]
         except Exception:
             return None
+
+    @staticmethod
+    def _inject_fixed_elements(analysis: ScreenAnalysis) -> None:
+        """Add fixed-position elements (icons OCR can't detect) for the screen type."""
+        fixed = _FIXED_ELEMENTS.get(analysis.screen_type)
+        if fixed:
+            for name, pos in fixed.items():
+                # Don't overwrite if already found with higher confidence
+                if name not in analysis.elements or analysis.elements[name][2] < pos[2]:
+                    analysis.elements[name] = pos
 
     # ── Tier 2.5: Minimap detection ───────────────────────────────
 

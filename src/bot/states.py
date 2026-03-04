@@ -35,7 +35,7 @@ from src.vision.parser import (
 )
 from src.vision.ocr_reader import read_monument_popup, check_screen_ocr, check_if_shop
 from src.vision.prompts import get_prompt
-from src.vision.screen_analyzer import ScreenAnalyzer, ScreenAnalysis
+from src.vision.screen_analyzer import ScreenAnalyzer, ScreenAnalysis, _FIXED_ELEMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -653,6 +653,16 @@ class StateHandlers:
 
             if locally_found:
                 ctx.log_action(f"Local detection found {len(locally_found)}/{len(needed)} for {screen_type}")
+
+        # ── Step 1.5: Inject fixed-position elements (icons OCR can't find) ──
+        fixed = _FIXED_ELEMENTS.get(screen_type, {})
+        for name, (x_pct, y_pct, conf) in fixed.items():
+            if name in needed and name not in locally_found:
+                self.calibrator.store(name, x_pct, y_pct, conf)
+                locally_found.add(name)
+                logger.info(
+                    f"  Fixed element: {name} at ({x_pct:.1f}%, {y_pct:.1f}%) conf={conf:.2f}"
+                )
 
         # ── Step 2: Check what still needs calibration ────────────
         still_needed = [n for n in needed if n not in locally_found]

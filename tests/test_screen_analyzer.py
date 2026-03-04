@@ -394,6 +394,47 @@ class TestOCRElementExtraction:
         assert "ok_button" in result.elements
 
 
+class TestFixedElements:
+    """Test that fixed-position elements are injected for matching screen types."""
+
+    def test_monument_popup_gets_close_popup(self):
+        """Monument popup detection should include close_popup from fixed elements."""
+        analysis = ScreenAnalysis(screen_type="monument_popup", confidence=0.9, method="ocr")
+        ScreenAnalyzer._inject_fixed_elements(analysis)
+        assert "close_popup" in analysis.elements
+        x, y, conf = analysis.elements["close_popup"]
+        assert x == 50.0
+        assert y == 94.5
+        assert conf == 0.75
+
+    def test_minimap_gets_minimap_close(self):
+        """Minimap detection should include minimap_close from fixed elements."""
+        analysis = ScreenAnalysis(screen_type="minimap", confidence=0.9, method="minimap")
+        ScreenAnalyzer._inject_fixed_elements(analysis)
+        assert "minimap_close" in analysis.elements
+        x, y, conf = analysis.elements["minimap_close"]
+        assert x == 50.0
+        assert y == 94.5
+
+    def test_unknown_screen_no_fixed_elements(self):
+        """Unknown screen types should not get any fixed elements."""
+        analysis = ScreenAnalysis(screen_type="main_map", confidence=0.9, method="ocr")
+        ScreenAnalyzer._inject_fixed_elements(analysis)
+        assert len(analysis.elements) == 0
+
+    def test_fixed_does_not_overwrite_higher_confidence(self):
+        """Fixed elements should not overwrite existing detections with higher confidence."""
+        analysis = ScreenAnalysis(
+            screen_type="monument_popup", confidence=0.9, method="ocr",
+            elements={"close_popup": (48.0, 93.0, 0.95)},
+        )
+        ScreenAnalyzer._inject_fixed_elements(analysis)
+        x, y, conf = analysis.elements["close_popup"]
+        # Should keep the original higher-confidence detection
+        assert x == 48.0
+        assert conf == 0.95
+
+
 class TestTierFallback:
     """Test that tiers execute in order and stop at first confident match."""
 
