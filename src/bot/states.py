@@ -423,6 +423,12 @@ class StateHandlers:
             logger.warning(f"OCR failed: {e}")
             return None
 
+        # Wrong-screen detection — OCR found shop/menu keywords instead of
+        # monument text.  Return a sentinel string so the caller can recover.
+        if reading.wrong_screen:
+            logger.info(f"OCR detected wrong screen: {reading.wrong_screen}")
+            return reading.wrong_screen  # str, not MonumentInfo or None
+
         if reading.overall_confidence < threshold:
             logger.info(
                 f"OCR confidence too low ({reading.overall_confidence:.2f} < {threshold}) "
@@ -1303,6 +1309,19 @@ class StateHandlers:
 
         # Try OCR first (free, ~200ms), fall back to Vision API
         info = self._read_monument_ocr(png, ctx, config)
+
+        # Wrong-screen detection: OCR found shop/menu keywords
+        if isinstance(info, str):
+            ctx.log_action(
+                f"Wrong screen detected ({info}) — closing and "
+                "invalidating monument calibration"
+            )
+            await self.input.back()
+            await self._wait(1.0, jitter, "closing wrong screen")
+            self.calibrator.invalidate("world_monument")
+            self._monument_tap_attempts = 0
+            return BotState.APPROACHING_MONUMENT
+
         if info is None:
             faction = config.get("bot", {}).get("faction", "Star Spirit")
             text = self._call_vision(png, "check_monument", faction_name=faction)

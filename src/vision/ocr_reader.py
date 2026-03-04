@@ -56,6 +56,7 @@ class OCRMonumentReading:
     action_button_text: str = ""
     overall_confidence: float = 0.0
     total_garrison_power: int = 0
+    wrong_screen: str = ""  # non-empty if OCR detected a wrong screen (e.g. "shop")
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +371,22 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
         logger.info(f"  OCR [{d['cy']:.2f}, {d['cx']:.2f}] conf={d['conf']:.2f} '{d['text']}'")
 
     reading = OCRMonumentReading()
+
+    # --- Wrong-screen detection ---
+    # Check if we accidentally opened the shop instead of the monument popup.
+    # Reuses the OCR we just ran — no extra call needed.
+    shop_hits = 0
+    for d in detections:
+        lower = d["text"].lower()
+        for kw in _SHOP_KEYWORDS:
+            if kw in lower:
+                shop_hits += 1
+                break
+    if shop_hits >= 2:
+        logger.info(f"OCR detected shop screen ({shop_hits} shop keywords) — not a monument popup")
+        reading.wrong_screen = "shop"
+        return reading
+
     confidences = []
 
     # --- Find section boundaries ---
