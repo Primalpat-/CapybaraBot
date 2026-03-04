@@ -24,10 +24,14 @@ identify_screen:
       level/tier text. IMPORTANT: If you see ANY sleeping capybara icon or "Hibernation ends"
       text, classify as "hibernation" NOT "main_map", even though the 3D map is visible
       underneath. The player cannot perform any actions until hibernation ends.
-    - "dormant_period": The main game map is visible, but a red/orange banner near
-      the bottom reads "Cannot attack:" followed by a countdown timer (HH:MM:SS).
-      The left sidebar shows a "Dormant Period" icon with "Zzz" symbols. The player
-      cannot attack until the timer expires.
+    - "cant_attack": The main game map is visible, but a dark banner near the
+      bottom of the screen reads "Cannot attack:" followed by a countdown timer
+      (HH:MM:SS) in red text. This is a temporary debuff from losing a battle.
+      The player cannot attack any monuments until the timer expires.
+      IMPORTANT: Do NOT confuse this with the "Dormant Period" icon on the left
+      sidebar — that icon is always visible and refers to hibernation, not this
+      debuff. Only classify as "cant_attack" if you see the "Cannot attack:"
+      banner text with a timer at the bottom of the screen.
     - "logged_out": A popup/dialog titled "Tips" with the text "Logged in on another device"
       and a large yellow "Restart" button. This appears when the user has logged in from a
       different device.
@@ -56,10 +60,10 @@ identify_screen:
 
     Return JSON only:
     {
-      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, dormant_period, logged_out, home_screen, mode_select, occupy_prompt, android_home, daily_popup, loading, menu, unknown>",
+      "screen_type": "<one of: main_map, minimap, monument_popup, battle_active, battle_result, hibernation, cant_attack, logged_out, home_screen, mode_select, occupy_prompt, android_home, daily_popup, loading, menu, unknown>",
       "confidence": <0.0-1.0>,
       "details": "<brief description of what you see>",
-      "timer": "<if hibernation or dormant_period, the countdown timer text e.g. '00:35:31', otherwise omit>"
+      "timer": "<if hibernation or cant_attack, the countdown timer text e.g. '00:35:31', otherwise omit>"
     }
 
 check_minimap_colors:

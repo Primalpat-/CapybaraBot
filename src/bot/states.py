@@ -33,7 +33,7 @@ from src.vision.parser import (
     parse_daily_popup_check,
     parse_timer_seconds,
 )
-from src.vision.ocr_reader import read_monument_popup, check_screen_ocr
+from src.vision.ocr_reader import read_monument_popup, check_screen_ocr, check_if_shop
 from src.vision.prompts import get_prompt
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class StateHandlers:
         self._monument_tap_attempts = 0
         self._retries_without_progress = 0  # consecutive failures across states
         self._hibernation_seconds: int | None = None  # countdown from last detection
-        self._dormant_seconds: int | None = None  # dormant period countdown
+        self._cant_attack_seconds: int | None = None  # "Cannot attack" debuff countdown
         self._defeat_counts: dict[str, int] = {}  # player_name -> consecutive defeats
         self._unbeatable_players: set[str] = set()  # derived: players exceeding max_defeats
         self._last_unbeatable_decay: float = time.time()  # when we last decayed the list
@@ -330,18 +330,18 @@ class StateHandlers:
             await self._wait(2.0, 0.3, "back button transition")
         return BotState.RECONNECTING
 
-    def _enter_dormant(self, screen, ctx: BotContext) -> BotState:
-        """Handle dormant period — parse timer and go idle.
+    def _enter_cant_attack(self, screen, ctx: BotContext) -> BotState:
+        """Handle 'Cannot attack' debuff — parse timer and go idle.
 
         Only called when a readable timer has been confirmed by the caller.
         """
         secs = parse_timer_seconds(screen.timer)
-        self._dormant_seconds = secs if secs and secs > 0 else 60
-        m, s = divmod(self._dormant_seconds, 60)
+        self._cant_attack_seconds = secs if secs and secs > 0 else 60
+        m, s = divmod(self._cant_attack_seconds, 60)
         h, m = divmod(m, 60)
-        ctx.log_action(f"Dormant period — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
+        ctx.log_action(f"Cannot attack debuff — {h}h{m:02d}m{s:02d}s remaining, sleeping until it ends")
         if self._event_logger:
-            self._event_logger.log("dormant_start", duration=secs)
+            self._event_logger.log("cant_attack_start", duration=secs)
         return BotState.IDLE
 
     def _save_calibration_diagnostic(self, png_bytes: bytes, elements: list, screen_type: str) -> None:
@@ -799,7 +799,7 @@ class StateHandlers:
           battle_active    → SKIPPING_BATTLE    Tap skip, wait for result
           battle_result    → tap OK → POST_BATTLE  Dismiss Victory/Defeat, check monument
           hibernation      → IDLE               Sleep until hibernation timer expires
-          dormant_period   → IDLE               Sleep until dormant timer expires
+          cant_attack      → IDLE               Sleep until "Cannot attack" debuff expires
           logged_out       → RECONNECTING       Wait delay → Restart → Star Trek → Alien Minefield
           home_screen      → RECONNECTING       Star Trek → Alien Minefield
           mode_select      → RECONNECTING       Alien Minefield
@@ -827,18 +827,18 @@ class StateHandlers:
 
         if screen.screen_type == "hibernation":
             return await self._enter_hibernation(screen, ctx, config)
-        elif screen.screen_type in ("dormant_period", "main_map"):
-            # Always OCR-check for the "Cannot attack" dormant debuff banner
+        elif screen.screen_type in ("cant_attack", "main_map"):
+            # Always OCR-check for the "Cannot attack" debuff banner
             # at the bottom of the screen.  Vision often classifies this as
             # "main_map" because the 3D world is still visible underneath.
             ocr_check = check_screen_ocr(png)
-            if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
+            if ocr_check.screen_type == "cant_attack" and ocr_check.timer:
                 secs = parse_timer_seconds(ocr_check.timer)
                 if secs and secs > 0:
                     screen.timer = ocr_check.timer
-                    return self._enter_dormant(screen, ctx)
-            if screen.screen_type == "dormant_period":
-                ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
+                    return self._enter_cant_attack(screen, ctx)
+            if screen.screen_type == "cant_attack":
+                ctx.log_action("Vision said cant_attack but no debuff banner found — proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "daily_popup":
             ctx.log_action("Daily popup detected — dismissing")
@@ -910,9 +910,9 @@ class StateHandlers:
                 self._minimap_open_attempts = 0
                 self._retries_without_progress = 0
                 return BotState.INITIALIZING
-            elif screen.screen_type in ("dormant_period", "main_map"):
+            elif screen.screen_type in ("cant_attack", "main_map"):
                 ocr_check = check_screen_ocr(png)
-                if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
+                if ocr_check.screen_type == "cant_attack" and ocr_check.timer:
                     secs = parse_timer_seconds(ocr_check.timer)
                     if secs and secs > 0:
                         self._minimap_open_attempts = 0
@@ -1264,6 +1264,18 @@ class StateHandlers:
                 ctx.log_action("Monument popup opened (detected locally)")
                 self._monument_tap_attempts = 0
                 return BotState.CHECKING_MONUMENT
+
+            # Check if we accidentally opened the shop or another menu
+            if check_if_shop(check_png):
+                ctx.log_action(
+                    "Opened shop instead of monument — closing and "
+                    "invalidating calibration"
+                )
+                await self.input.back()
+                await self._wait(1.0, jitter, "closing shop")
+                self.calibrator.invalidate("world_monument")
+                self._monument_tap_attempts = 0
+                return BotState.APPROACHING_MONUMENT
 
             self._monument_tap_attempts = i + 1
 
@@ -2034,13 +2046,13 @@ class StateHandlers:
             ctx.log_action(f"Hibernation sleep — waking in {h}h{m:02d}m{s:02d}s")
             await self._wait(float(sleep_secs), 0.05, "hibernation sleep")
             self._hibernation_seconds = None
-        elif self._dormant_seconds is not None and self._dormant_seconds > 0:
-            sleep_secs = self._dormant_seconds + 30
+        elif self._cant_attack_seconds is not None and self._cant_attack_seconds > 0:
+            sleep_secs = self._cant_attack_seconds + 30
             m, s = divmod(sleep_secs, 60)
             h, m = divmod(m, 60)
             ctx.log_action(f"Dormant sleep — waking in {h}h{m:02d}m{s:02d}s")
-            await self._wait(float(sleep_secs), 0.05, "dormant sleep")
-            self._dormant_seconds = None
+            await self._wait(float(sleep_secs), 0.05, "cant_attack sleep")
+            self._cant_attack_seconds = None
         else:
             idle_secs = random.uniform(10.0, 45.0)
             ctx.log_action(f"Idle — rechecking in {idle_secs:.0f}s")
@@ -2053,7 +2065,7 @@ class StateHandlers:
         # only way to get real status, so we need to reopen each one).
         self._visited_slots.clear()
 
-        # Quick OCR check for hibernation/dormant before resuming
+        # Quick OCR check for hibernation/cant_attack before resuming
         png = await self.capture.capture()
         ctx.last_screenshot = png
 
@@ -2069,13 +2081,13 @@ class StateHandlers:
             else:
                 ctx.log_action("OCR detected hibernation but timer unreadable — using Vision")
                 return BotState.INITIALIZING
-        elif ocr_screen.screen_type == "dormant_period":
+        elif ocr_screen.screen_type == "cant_attack":
             secs = parse_timer_seconds(ocr_screen.timer)
             if secs and secs > 0:
-                self._dormant_seconds = secs
-                ctx.log_action(f"OCR detected dormant period ({ocr_screen.timer}) — sleeping")
+                self._cant_attack_seconds = secs
+                ctx.log_action(f"OCR detected 'Cannot attack' debuff ({ocr_screen.timer}) — sleeping")
                 if self._event_logger:
-                    self._event_logger.log("dormant_start", duration=secs, source="ocr")
+                    self._event_logger.log("cant_attack_start", duration=secs, source="ocr")
                 return BotState.IDLE
             # No timer = sidebar icon false positive, not an actual debuff
 
@@ -2166,16 +2178,16 @@ class StateHandlers:
             return BotState.RECONNECTING
         elif screen.screen_type == "minimap":
             return BotState.READING_MINIMAP
-        elif screen.screen_type in ("main_map", "dormant_period"):
-            # Check for dormant debuff ("Cannot attack" banner at bottom)
+        elif screen.screen_type in ("main_map", "cant_attack"):
+            # Check for "Cannot attack" debuff banner at bottom of screen
             ocr_check = check_screen_ocr(png)
-            if ocr_check.screen_type == "dormant_period" and ocr_check.timer:
+            if ocr_check.screen_type == "cant_attack" and ocr_check.timer:
                 secs = parse_timer_seconds(ocr_check.timer)
                 if secs and secs > 0:
                     screen.timer = ocr_check.timer
-                    return self._enter_dormant(screen, ctx)
-            if screen.screen_type == "dormant_period":
-                ctx.log_action("Vision said dormant but no debuff popup found — proceeding")
+                    return self._enter_cant_attack(screen, ctx)
+            if screen.screen_type == "cant_attack":
+                ctx.log_action("Vision said cant_attack but no debuff banner found — proceeding")
             return BotState.OPENING_MINIMAP
         elif screen.screen_type == "monument_popup":
             return BotState.CHECKING_MONUMENT

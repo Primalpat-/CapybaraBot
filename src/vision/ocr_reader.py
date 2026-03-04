@@ -581,28 +581,71 @@ def read_monument_popup(png_bytes: bytes, friendly_faction: str = "star spirit")
 
 
 # ---------------------------------------------------------------------------
-# Hibernation / Dormant screen detection via OCR
+# Quick OCR checks for wrong-screen detection
+# ---------------------------------------------------------------------------
+
+# Keywords that indicate we accidentally opened the shop
+_SHOP_KEYWORDS = {
+    "season shop", "sergeant medal", "armour chip", "armament cone",
+    "purchase limit", "exchange", "shop",
+}
+
+
+def check_if_shop(png_bytes: bytes) -> bool:
+    """Quick OCR check: did we accidentally open the shop?
+
+    Looks for shop-specific keywords in the screenshot.  Returns True if
+    2+ shop keywords are found (avoids false positives from a single word
+    like 'Shop' in the bottom nav bar).
+    """
+    try:
+        arr = np.frombuffer(png_bytes, dtype=np.uint8)
+        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if image is None:
+            return False
+
+        reader = _get_reader()
+        results = reader.readtext(image, detail=0)  # text only, faster
+
+        hits = 0
+        for text in results:
+            lower = text.lower().strip()
+            for kw in _SHOP_KEYWORDS:
+                if kw in lower:
+                    hits += 1
+                    break
+            if hits >= 2:
+                logger.info(f"OCR detected shop screen ({hits} keywords found)")
+                return True
+        return False
+    except Exception as e:
+        logger.warning(f"OCR shop check failed: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Hibernation / Can't-attack screen detection via OCR
 # ---------------------------------------------------------------------------
 
 @dataclass
 class OCRScreenReading:
-    """Result of OCR-based screen check for hibernation/dormant overlays."""
-    screen_type: str = ""       # "hibernation", "dormant_period", or ""
+    """Result of OCR-based screen check for hibernation/cant_attack overlays."""
+    screen_type: str = ""       # "hibernation", "cant_attack", or ""
     timer: str = ""             # raw timer text (e.g. "3:21:05")
     confidence: float = 0.0
 
 
 def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
-    """Quick OCR scan of the full screen for hibernation/dormant text.
+    """Quick OCR scan of the full screen for hibernation / can't-attack text.
 
     Looks for keywords like "hibernation" or "cannot attack" and a nearby
     timer pattern (HH:MM:SS or MM:SS).  Much faster and cheaper than a
     Vision API call.
 
-    Dormant detection requires "cannot attack" text (NOT "dormant" alone,
-    because the sidebar always shows a "Dormant Period" icon).  The dormant
-    debuff popup appears at the bottom-middle of the screen, so both the
-    keyword and timer must be in the bottom half (y > 50%).
+    Can't-attack detection requires "cannot attack" text (NOT "dormant" alone,
+    because the sidebar always shows a "Dormant Period" icon — that refers to
+    hibernation).  The debuff banner appears at the bottom-middle of the screen,
+    so both the keyword and timer must be in the bottom half (y > 50%).
     """
     reading = OCRScreenReading()
     try:
@@ -636,9 +679,9 @@ def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
                 detected_type = "hibernation"
                 best_confidence = max(best_confidence, conf)
             elif "cannot attack" in lower and in_bottom_half:
-                # Only match the actual debuff popup at the bottom, not the
-                # "Dormant Period" sidebar icon which is always visible.
-                detected_type = "dormant_period"
+                # Only match the actual debuff banner at the bottom, not the
+                # "Dormant Period" sidebar icon (which refers to hibernation).
+                detected_type = "cant_attack"
                 best_confidence = max(best_confidence, conf)
 
             # Look for timer pattern (H:MM:SS or MM:SS)
@@ -646,9 +689,9 @@ def check_screen_ocr(png_bytes: bytes) -> OCRScreenReading:
             if not timer_match:
                 timer_match = re.search(r"\d{1,2}:\d{2}", text)
             if timer_match:
-                # For dormant, only accept timers in bottom half of screen.
-                # The skull timer in the top-left is NOT the dormant timer.
-                if detected_type != "dormant_period" or in_bottom_half:
+                # For cant_attack, only accept timers in bottom half of screen.
+                # The skull timer in the top-left is NOT the debuff timer.
+                if detected_type != "cant_attack" or in_bottom_half:
                     timer_text = timer_match.group(0)
 
         if detected_type:
