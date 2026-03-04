@@ -939,7 +939,7 @@ class StateHandlers:
             ctx.log_action("Multiple minimap failures — verifying we're in the game")
             png = await self.capture.capture()
             ctx.last_screenshot = png
-            _, screen = await self._identify_screen(png, ctx, config)
+            _, screen = await self._wait_past_loading(ctx, config, "minimap verify")
             if screen.screen_type in ("home_screen", "mode_select", "logged_out", "android_home"):
                 ctx.log_action(f"Not in game ({screen.screen_type}) — entering reconnection flow")
                 self._minimap_open_attempts = 0
