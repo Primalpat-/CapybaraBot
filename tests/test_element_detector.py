@@ -132,20 +132,16 @@ class TestColorDetection:
         assert det.name == "restart_button"
         assert det.method == "color"
 
-    def test_finds_minimap_button(self):
-        """Small purple square at top-right of main_map screen."""
+    def test_purple_not_detected_as_minimap_button(self):
+        """Purple color detection removed for minimap_button (too many false positives).
+        Now provided via _FIXED_ELEMENTS in screen_analyzer.py instead."""
         img = _make_image()
         h, w = img.shape[:2]
         _draw_purple_square(img, int(w * 0.85), int(h * 0.12))
         png = _to_png(img)
 
         results = self.detector.detect(png, "main_map")
-        assert len(results) == 1
-        det = results[0]
-        assert det.name == "minimap_button"
-        assert det.method == "color"
-        assert 70 < det.x_percent < 95
-        assert 5 < det.y_percent < 25
+        assert len(results) == 0
 
     def test_different_resolutions(self):
         """Detection works at 720p, 1080p, and 1440p."""

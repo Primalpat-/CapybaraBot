@@ -127,6 +127,9 @@ _FIXED_ELEMENTS: dict[str, dict[str, tuple[float, float, float]]] = {
     "minimap": {
         "minimap_close": (50.0, 94.5, 0.75),  # X button same position
     },
+    "main_map": {
+        "minimap_button": (94.5, 20.7, 0.75),  # Magnifying glass at bottom-right of minimap widget
+    },
 }
 
 

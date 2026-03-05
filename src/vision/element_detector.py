@@ -106,12 +106,10 @@ _COLOR_ELEMENTS: dict[tuple[str, str], dict] = {
         "hsv_upper": _PINK_UPPER,
         "min_area_frac": 0.003,
     },
-    ("main_map", "minimap_button"): {
-        "region": _TOP_RIGHT,
-        "hsv_lower": _PURPLE_LOWER,
-        "hsv_upper": _PURPLE_UPPER,
-        "min_area_frac": 0.0003,
-    },
+    # NOTE: minimap_button was previously detected here via purple HSV, but the
+    # range is too broad — it matches map icons (spodumene, etc.) inside the
+    # minimap widget instead of the magnifying glass button.  Now provided via
+    # _FIXED_ELEMENTS in screen_analyzer.py instead.
 }
 
 _TEMPLATE_ELEMENTS: dict[tuple[str, str], dict] = {

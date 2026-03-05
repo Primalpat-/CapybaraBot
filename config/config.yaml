@@ -39,8 +39,8 @@ coordinates:
     x: 450
     y: 1512
   minimap_button:
-    x: 980
-    y: 180
+    x: 851
+    y: 331
   minimap_center:
     x: 540
     y: 960

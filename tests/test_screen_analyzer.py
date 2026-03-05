@@ -417,8 +417,8 @@ class TestFixedElements:
         assert y == 94.5
 
     def test_unknown_screen_no_fixed_elements(self):
-        """Unknown screen types should not get any fixed elements."""
-        analysis = ScreenAnalysis(screen_type="main_map", confidence=0.9, method="ocr")
+        """Screen types without fixed elements should not get any injected."""
+        analysis = ScreenAnalysis(screen_type="battle_active", confidence=0.9, method="ocr")
         ScreenAnalyzer._inject_fixed_elements(analysis)
         assert len(analysis.elements) == 0
 
